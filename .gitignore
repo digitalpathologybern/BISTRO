@@ -1,0 +1,45 @@
+# Nextflow
+.nextflow/
+.nextflow.log*
+work/
+nxf_temp/
+*-trace.txt
+*-report.html
+*-timeline.html
+*-dag.html
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+.pytest_cache/
+.mypy_cache/
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
+*.Rproj
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Pipeline outputs (do NOT commit large data)
+slurm_logs/
+*.zarr/
+*.rds
+*.RData
+*.h5ad
+*.loom
+
+# Allow generated env files under envs/ (overrides *.RData rule above)
+!envs/*.csv
+!envs/*.yml
+!envs/*.txt
+!envs/*.sh
+
+
