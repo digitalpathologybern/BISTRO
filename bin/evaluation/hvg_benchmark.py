@@ -713,10 +713,11 @@ def run_single_layer(
     )
     log(f"  Checkpoint path: {ckpt_path}")
 
-    # Phase-level tmp dir: inside output_dir so Nextflow publishDir captures it
-    # Cleaned up per-fraction after all phases complete
+    # Layer-level tmp parent. Each fraction gets its OWN subdir below this
+    # (frac{f}/), so concurrent fractions of the same layer never share a
+    # directory and can never delete each other's checkpoints.
     tmp_base = (
-        Path(ckpt_base) / "tmp"
+        Path(ckpt_base) / "tmp" / layer_safe
     )
     log(f"  Phase tmp dir: {tmp_base}")
 
@@ -750,9 +751,12 @@ def run_single_layer(
 
         log(f"  frac={frac:.0%} ({n_selected}/{adata.n_vars} genes)")
 
-        # -- Phase checkpoint paths (inside tmp) ----------------------------
-        ph_ckpt = _phase_ckpt_path(tmp_base, layer_safe, frac)
-        pca_npy = _pca_cache_path(tmp_base, layer_safe, frac)
+        # -- Per-fraction tmp dir + checkpoint paths ------------------------
+        # Scoping tmp to the fraction is what prevents a sibling fraction's
+        # cleanup from deleting this fraction's live checkpoints.
+        frac_tmp = tmp_base / f"frac{frac:.2f}"
+        ph_ckpt = _phase_ckpt_path(frac_tmp, layer_safe, frac)
+        pca_npy = _pca_cache_path(frac_tmp, layer_safe, frac)
  
         phase_done = load_phase_ckpt(ph_ckpt)
 
@@ -829,7 +833,7 @@ def run_single_layer(
         if frac < 1.0 and "phase3" not in phase_done:
             try:
                 log("    Phase 3: HVG vs. random control ...")
-                p3_ckpt = tmp_base / "phase_checkpoints" / f"{layer_safe}_frac{frac:.2f}_phase3.json"
+                p3_ckpt = frac_tmp / "phase_checkpoints" / f"{layer_safe}_frac{frac:.2f}_phase3.json"
                 hvg_stab, rand_stabs = phase3_hvg_vs_random(
                     adata, layer_name, frac, hvg_mask, cfg,
                     hvg_pca_embedding=hvg_pca,
@@ -922,16 +926,13 @@ def run_single_layer(
         results.append(row)
         save_checkpoint(results, ckpt_path)
 
-        # Clean up phase tmp files for this fraction
-        if ph_ckpt.exists():
-            ph_ckpt.unlink()
-        if pca_npy.exists():
-            pca_npy.unlink()
-        # Remove tmp subdirectory if empty
-        try:
-            ph_ckpt.parent.rmdir()
-        except OSError:
-            pass  # not empty (other fractions still running)
+        # Clean up this fraction's own tmp tree. Because frac_tmp is unique
+        # to this fraction, this can never touch another fraction's files.
+        if frac_tmp.exists():
+            try:
+                shutil.rmtree(frac_tmp)
+            except OSError:
+                pass
         log(f"    Fraction {frac:.0%} complete, phase tmp cleaned up")
  
     log(f"Finished: {dataset_name} / {layer_name} ({len(results)} rows)")
@@ -947,13 +948,15 @@ def run_single_layer(
         save_checkpoint(results, final_path)
         log(f"Final output: {final_path}")
 
-    # Clean up tmp directory if empty (all fractions done)
-    if tmp_base.exists():
-        try:
-            shutil.rmtree(tmp_base)
-            log(f"  Cleaned up tmp dir: {tmp_base}")
-        except OSError:
-            pass
+    # Remove the layer tmp parent ONLY if empty. Never rmtree it: a sibling
+    # fraction of the same layer may be running concurrently and still owns
+    # its frac{f}/ subdir below this path.
+    #if tmp_base.exists():
+    #    try:
+    #        tmp_base.rmdir()
+    #        log(f"  Cleaned up empty tmp dir: {tmp_base}")
+    #    except OSError:
+    #        pass  # other fractions still have subdirs here
 
 
 # ============================================================================

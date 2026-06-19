@@ -49,6 +49,21 @@ def find_highly_variable_genes(norm_count_csv, output_plot, output_csv, is_scTra
 
     # Highly Variable Genes
     if method != 'scTransform' and method != 'spanorm-pearson':
+        # Guard against overflow inside scanpy's Seurat-flavor HVG, which
+        # internally applies np.expm1() to the data. For pathologically large
+        # log-scale values (e.g. occasional SpaNorm logpac outliers) expm1
+        # overflows to +inf, producing infinite gene means that break the
+        # mean-binning step (pd.cut). Legitimate log-normalized expression
+        # never exceeds ~15, so we only clip when a value is far above that
+        # range; on all normal datasets max_val <= EXPM1_SAFE_MAX and this is
+        # a no-op, leaving the rest of the execution unchanged.
+        EXPM1_SAFE_MAX = 100.0
+        max_val = np.nanmax(adata.X)
+        if max_val > EXPM1_SAFE_MAX:
+            print(f"Warning: max value {max_val:.2f} exceeds safe expm1 range; "
+                  f"clipping to {EXPM1_SAFE_MAX} before HVG selection.")
+            adata.X = np.clip(adata.X, None, EXPM1_SAFE_MAX)
+
         adata = sc.pp.highly_variable_genes(adata, flavor = 'seurat', inplace = False) # Expect log1p transformed data, so for consistency we have to do it
 
         # Plot and save

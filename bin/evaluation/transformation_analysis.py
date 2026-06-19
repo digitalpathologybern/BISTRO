@@ -670,6 +670,7 @@ def compute_pc1_correlations(mean_var_stats, pc_col="PC1"):
 def run_transformation_pipeline(
     zarr_path, nextflow_output, output_dir, dataset_name=None,
     technology=None, pseudocounts=None, alpha=0.05, theta=100,
+    checkpoint_dir=None,
 ):
     """
     Run the full transformation analysis across all normalization layers.
@@ -720,6 +721,20 @@ def run_transformation_pipeline(
     if pseudocounts is None:
         pseudocounts = [0.01, 0.1, 0.5, 1, 10]
 
+    # Per-layer checkpoint directory (persistent across job restarts).
+    if checkpoint_dir is None:
+        checkpoint_dir = os.path.join(output_dir, 'checkpoints')
+    os.makedirs(checkpoint_dir, exist_ok=True)
+
+    def _layer_ckpt(layer):
+        safe = layer.replace('/', '_')
+        return os.path.join(checkpoint_dir,
+                            f"{dataset_name}_stats_{safe}.parquet")
+
+    standalone_ckpt = os.path.join(
+        checkpoint_dir, f"{dataset_name}_stats_standalone.parquet"
+    )
+
     # Transformation methods to apply to each scale-factor-based normalization
     transforms = ['sqrt', 'loga', 'scTransform', 'none', 'spanorm']
 
@@ -747,6 +762,12 @@ def run_transformation_pipeline(
         if layer == 'spanorm':
             continue
 
+        ckpt = _layer_ckpt(layer)
+        if os.path.exists(ckpt):
+            print(f"\n--- Base layer {layer}: checkpoint found, loading ---")
+            all_stats_dfs.append(pd.read_parquet(ckpt))
+            continue
+
         print(f"\n--- Processing base layer: {layer} ---")
         try:
             # Load normalized expression matrix
@@ -759,16 +780,26 @@ def run_transformation_pipeline(
             )
 
             # Compute mean/variance/PCA for each derived layer
+            layer_dfs = []
             for derived_name, data_matrix in derived_layers.items():
                 print(f"  Analyzing: {derived_name}")
                 df_stats = compute_pca_and_stats(
                     sd_obj, derived_name, data_matrix, dataset_name, technology
                 )
-                all_stats_dfs.append(df_stats)
+                layer_dfs.append(df_stats)
                 del data_matrix
 
+            # Write this layer's checkpoint atomically before moving on.
+            # A base layer that reaches here is never recomputed on restart.
+            layer_df = pd.concat(layer_dfs, ignore_index=True)
+            tmp = ckpt + ".tmp"
+            layer_df.to_parquet(tmp, index=False)
+            os.replace(tmp, ckpt)
+            print(f"  Checkpoint written: {ckpt}")
+            all_stats_dfs.append(layer_df)
+
             # Clean up
-            del derived_layers
+            del derived_layers, layer_dfs, layer_df
             unload_layer(sd_obj, layer)
             gc.collect()
 
@@ -784,22 +815,35 @@ def run_transformation_pipeline(
     print(f"\n{'='*60}")
     print("Standalone transforms on raw counts")
     print(f"{'='*60}")
-    try:
-        raw_X = sd_obj.tables['filtered'].X
-        standalone_layers = apply_standalone_transforms(
-            raw_X, alpha=alpha, theta=theta
-        )
-        for derived_name, data_matrix in standalone_layers.items():
-            print(f"  Analyzing: {derived_name}")
-            df_stats = compute_pca_and_stats(
-                sd_obj, derived_name, data_matrix, dataset_name, technology
+    if os.path.exists(standalone_ckpt):
+        print("  Standalone transforms: checkpoint found, loading")
+        all_stats_dfs.append(pd.read_parquet(standalone_ckpt))
+    else:
+        try:
+            raw_X = sd_obj.tables['filtered'].X
+            standalone_layers = apply_standalone_transforms(
+                raw_X, alpha=alpha, theta=theta
             )
-            all_stats_dfs.append(df_stats)
-            del data_matrix
-        del standalone_layers
-        gc.collect()
-    except Exception as e:
-        print(f"  FAILED standalone transforms: {e}")
+            standalone_dfs = []
+            for derived_name, data_matrix in standalone_layers.items():
+                print(f"  Analyzing: {derived_name}")
+                df_stats = compute_pca_and_stats(
+                    sd_obj, derived_name, data_matrix, dataset_name, technology
+                )
+                standalone_dfs.append(df_stats)
+                del data_matrix
+
+            standalone_df = pd.concat(standalone_dfs, ignore_index=True)
+            tmp = standalone_ckpt + ".tmp"
+            standalone_df.to_parquet(tmp, index=False)
+            os.replace(tmp, standalone_ckpt)
+            print(f"  Checkpoint written: {standalone_ckpt}")
+            all_stats_dfs.append(standalone_df)
+
+            del standalone_layers, standalone_dfs, standalone_df
+            gc.collect()
+        except Exception as e:
+            print(f"  FAILED standalone transforms: {e}")
 
     if not all_stats_dfs:
         print("No results generated.")
@@ -875,6 +919,11 @@ def build_parser():
     p.add_argument("--theta", type=float, default=100,
                    help="NB overdispersion for analytic Pearson residuals "
                         "(default 100, per Lause et al. 2021)")
+    p.add_argument("--checkpoint_dir", default=None,
+                   help="Persistent directory for per-layer stat checkpoints "
+                        "that survive a wall-time kill. Layers with a complete "
+                        "checkpoint are skipped on resume. Defaults to "
+                        "<output_dir>/checkpoints.")
     return p
 
 
@@ -890,6 +939,7 @@ def main():
         pseudocounts=args.pseudocounts,
         alpha=args.alpha,
         theta=args.theta,
+        checkpoint_dir=args.checkpoint_dir,
     )
 
 

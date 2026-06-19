@@ -422,9 +422,17 @@ process hvg_selection {
     publishDir "${params.output_folder_path}", mode: 'copy'
 
     script:
+    def base = norm_csv.getName().replaceAll('\\.csv$', '')
     """
     mkdir -p $outputHVG
-    python ${projectDir}/bin/find_hvg.py --norm_counts_csv $norm_csv --output_csv $outputHVG
+    PUB="${params.output_folder_path}/$outputHVG"
+    if [ "${params.restore_published}" = "true" ] && \\
+       ls "\$PUB"/${base}_hvg.csv 1>/dev/null 2>&1; then
+        ln -s "\$PUB"/${base}_hvg.csv $outputHVG/
+        echo "Restored ${base}_hvg from published output"
+    else
+        python ${projectDir}/bin/find_hvg.py --norm_counts_csv $norm_csv --output_csv $outputHVG
+    fi
     """
 }
 
@@ -622,6 +630,7 @@ process batch_effect_evaluation {
             --metadata $enrichedMetadata \\
             --pixel_size $pixelSize \\
             --n_boot_ci ${params.n_boot_ci} \\
+            --checkpoint_dir "${params.output_folder_path}/$outputDir/checkpoints" \\
             $he_arg \\
             $vc_arg \\
             --use_log
@@ -671,7 +680,8 @@ process transformation_analysis {
             --technology "$technology" \\
             --pseudocounts 0.01 0.1 0.5 1 10 \\
             --alpha 0.05 \\
-            --theta 100
+            --theta 100 \\
+            --checkpoint_dir "${params.output_folder_path}/$outputDir/checkpoints"
     fi
     """
 }
@@ -710,6 +720,10 @@ process hvg_benchmark {
         echo "Restored ${layerName}_\${FRAC} from published output"
     else
         export PYTHONPATH=${projectDir}/utils:\${PYTHONPATH:-}
+        # Per-task node-local numba cache: avoids the "no locator available"
+        # race when many concurrent tasks share ~/.cache/numba on the cluster FS.
+        export NUMBA_CACHE_DIR="\${TMPDIR:-/tmp}/numba_cache_\${SLURM_JOB_ID:-\$\$}"
+        mkdir -p "\$NUMBA_CACHE_DIR"
         python ${projectDir}/bin/evaluation/hvg_benchmark.py \\
             --zarr $zarrFile \\
             --nextflow_output "$nextflowOutputPath" \\
@@ -726,7 +740,8 @@ process hvg_benchmark {
             --seed ${params.hvg_seed} \\
             --hvg_fractions $hvgFraction \\
             --reference_annotation $referenceAnnotation \\
-            --n_bootstrap_phase3 ${params.hvg_n_bootstrap}
+            --n_bootstrap_phase3 ${params.hvg_n_bootstrap} \\
+            --n_jobs ${task.cpus}
     fi
     """
 }
@@ -993,7 +1008,7 @@ workflow {
             'BISTRO_report.html',
             batchSummary.mix(batchIntercepts).mix(batchFovSummary).mix(batchTissueLs).mix(batchDriftComp).mix(batchDriftInt).mix(batchDriftCenters).collect(),
             transSummary.mix(transPC1).collect(),
-            hvgBenchCollected,
+            hvgBenchCollected.ifEmpty([]),
             ariResults
         )
     }

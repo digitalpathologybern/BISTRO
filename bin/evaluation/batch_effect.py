@@ -542,7 +542,7 @@ def run_batch_effect_pipeline(
     zarr_path, nextflow_output, technology, tissue_annotation_path,
     output_dir, dataset_name=None, use_log=True, metadata_csv=None,
     he_alignment_path=None, pixel_size=0.2125, n_boot_ci=200,
-    vc_column=None,
+    vc_column=None, checkpoint_dir=None,
 ):
     """
     Run the full batch effect evaluation across all normalization layers.
@@ -703,6 +703,12 @@ def run_batch_effect_pipeline(
         )
         print(f"Saved drift comparison outputs")
 
+    # ---- Set up per-layer checkpoint directory (persistent across restarts) ----
+    if checkpoint_dir is None:
+        checkpoint_dir = os.path.join(output_dir, 'checkpoints')
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    print(f"Per-layer checkpoint directory: {checkpoint_dir}")
+
     # ---- Process each normalization layer ----
     all_results = {}
     all_random_intercepts = []
@@ -712,6 +718,21 @@ def run_batch_effect_pipeline(
         print(f"\n{'='*60}")
         print(f"Processing: {layer_name}")
         print(f"{'='*60}")
+
+        ckpt_summary = os.path.join(checkpoint_dir, f"{dataset_name}_{layer_name}_summary.csv")
+        ckpt_re      = os.path.join(checkpoint_dir, f"{dataset_name}_{layer_name}_random_intercepts.csv")
+        ckpt_model   = os.path.join(checkpoint_dir, f"{dataset_name}_{layer_name}_model.pkl")
+
+        # Resume: skip layers that already have a complete checkpoint
+        if (os.path.exists(ckpt_summary)
+                and os.path.exists(ckpt_re)
+                and os.path.exists(ckpt_model)):
+            print(f"  Checkpoint found for {layer_name}, loading and skipping recomputation.")
+            summary_rows.append(pd.read_csv(ckpt_summary).iloc[0].to_dict())
+            all_random_intercepts.append(pd.read_csv(ckpt_re))
+            with open(ckpt_model, 'rb') as f:
+                all_results[layer_name] = pickle.load(f)
+            continue
 
         try:
             # Load layer into memory
@@ -724,15 +745,9 @@ def run_batch_effect_pipeline(
                 vc_column=vc_column,
             )
 
-            all_results[layer_name] = result
+            re_layer = result['random_effects_mixedlm_model_random_intercept']
 
-            # Collect random intercepts for the combined CSV
-            all_random_intercepts.append(
-                result['random_effects_mixedlm_model_random_intercept']
-            )
-
-            # Collect summary row (exclude non-serializable model objects)
-            summary_rows.append({
+            summary_row = {
                 'layer': result['layer'],
                 'dataset': result['dataset'],
                 'technology': result['technology'],
@@ -754,7 +769,20 @@ def run_batch_effect_pipeline(
                 'drift_slope': result['drift_slope'],
                 'vc_column': result.get('vc_column', ''),
                 'var_vc_reml': result.get('var_vc_reml', np.nan),
-            })
+            }
+
+            # Write the per-layer checkpoint immediately, before moving on.
+            # This is the unit of resumable work: a layer that gets here is
+            # never recomputed on a subsequent restart.
+            pd.DataFrame([summary_row]).to_csv(ckpt_summary, index=False)
+            re_layer.to_csv(ckpt_re, index=False)
+            with open(ckpt_model, 'wb') as f:
+                pickle.dump(result, f, protocol=pickle.HIGHEST_PROTOCOL)
+            print(f"  Checkpoint written for {layer_name}")
+
+            all_results[layer_name] = result
+            all_random_intercepts.append(re_layer)
+            summary_rows.append(summary_row)
 
             # Unload to free memory
             unload_layer(sd_obj, layer_name)
@@ -836,6 +864,11 @@ def build_parser():
                         "nested patient/FOV structure). The column must be "
                         "present in the metadata CSV. If not provided, the "
                         "standard FOV-only random intercept model is used.")
+    p.add_argument("--checkpoint_dir", default=None,
+                   help="Directory for per-layer checkpoints, persistent "
+                        "across job restarts. Layers with a complete "
+                        "checkpoint are skipped on resume. Defaults to "
+                        "<output_dir>/checkpoints.")
     return p
 
 
@@ -855,6 +888,7 @@ def main():
         pixel_size=args.pixel_size,
         n_boot_ci=args.n_boot_ci,
         vc_column=args.vc_column,
+        checkpoint_dir=args.checkpoint_dir,
     )
 
 
