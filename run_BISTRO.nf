@@ -851,6 +851,34 @@ workflow {
     skip_pathway    = params.skip_pathway ?: false
     skip_hvg_bench    = params.skip_hvg_bench ?: false
 
+    // ---- Reference annotation for the HVG benchmark (Phase 4b) ----
+    // hvg_benchmark needs a set of reference cell-type labels. By default these
+    // come from the InSituType run on the "none" normalization at 100% HVG,
+    // which only exists when the annotation step runs. Setting
+    // params.referenceAnnotation overrides that and lets an external annotation
+    // CSV be used instead -- required when skip_annotation = true.
+    referenceAnnotation = params.referenceAnnotation ?: ''
+
+    // Validate up front, before any process is scheduled, so a misconfigured
+    // run fails immediately rather than after the normalizations have finished.
+    if (!skip_hvg_bench) {
+        if (referenceAnnotation) {
+            if (!file(referenceAnnotation).exists()) {
+                error "params.referenceAnnotation = '${referenceAnnotation}' does not exist. " +
+                      "Point it at an InSituType-style annotation CSV (cell IDs in the index, " +
+                      "labels in a 'sup.clust' column), or unset it to derive the reference " +
+                      "from the pipeline's own annotation step."
+            }
+        }
+        else if (skip_annotation) {
+            error "The HVG benchmark needs a reference cell-type annotation, which is normally " +
+                  "taken from the InSituType output for the \"none\" normalization at 100% HVG. " +
+                  "That output is unavailable because skip_annotation = true. Either set " +
+                  "skip_annotation = false, or set params.referenceAnnotation to an existing " +
+                  "annotation CSV, or set skip_hvg_bench = true."
+        }
+    }
+
     // ========================================================================
     // STEP 1: Read zarr
     // ========================================================================
@@ -909,6 +937,12 @@ workflow {
     // ========================================================================
     // STEP 8: Cell type annotation (InSituType)
     // ========================================================================
+    // Reference annotation eventually handed to hvg_benchmark. Declared here,
+    // outside the skip_annotation block, so it is always in scope for STEP 12.
+    // An explicit params.referenceAnnotation wins; otherwise it is derived from
+    // the annotation outputs below.
+    referenceAnnotationPath = referenceAnnotation ? file(referenceAnnotation) : null
+
     if (!skip_annotation) {
         scReferenceFile = file(params.scReferenceFile)
         annotations = insitutype_annotation(scReferenceFile, countMatrix, allNormCollected, metadataMatrix, selectedHVGCSV.flatMap(), outputAnno)
@@ -916,7 +950,9 @@ workflow {
         annoCollected = annotations.collect()
 
         // Reference annotation for HVG benchmark (from InSituType "none" at 100% HVG)
-        referenceAnnotationPath = annotations.flatten().filter { it.name ==~ /.*1.0_HVG_none_annotation\.csv/ }.first()
+        if (!referenceAnnotation) {
+            referenceAnnotationPath = annotations.flatten().filter { it.name ==~ /.*1.0_HVG_none_annotation\.csv/ }.first()
+        }
     }
 
 
@@ -961,10 +997,11 @@ workflow {
     hvgFractionsChannel = Channel.of(params.hvg_fractions.trim().split(/\s+/)).flatten()
     layerFractionPairs = layerNamesChannel.combine(hvgFractionsChannel)
 
-    // Reference annotation: InSituType from "none" normalization at 100% HVG
-    // Extract the reference annotation file from InSituType outputs
-    // (1.0_HVG_none_annotation.csv = "none" normalization at 100% HVG)
-    // referenceAnnotationPath = annotations.flatten().filter { it.name ==~ /.*1.0_HVG_none_annotation\.csv/ }.first()
+    // The reference annotation (referenceAnnotationPath) is resolved at STEP 8:
+    // either params.referenceAnnotation, or the InSituType output for the "none"
+    // normalization at 100% HVG (1.0_HVG_none_annotation.csv). The combination
+    // that would leave it unset -- skip_annotation with no explicit path -- is
+    // rejected by the validation at the top of this workflow.
 
     // Default: empty channel when HVG benchmark is skipped, so generate_report
     // still has something to consume for its `_hvgBenchDone` input.

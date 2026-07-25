@@ -190,6 +190,12 @@ params {
 
     n_boot_ci            = 200     // bootstrap reps for τ² CI
 
+    // ── Reference annotation (HVG benchmark, Phase 4b) ───────────────────
+    // Optional. Leave empty to use the pipeline's own InSituType output for
+    // the `none` normalization at 100% HVG. Must be set to an existing
+    // annotation CSV when skip_annotation = true and skip_hvg_bench = false.
+    referenceAnnotation = ''
+
     // ── Toggles ─────────────────────────────────────────────────────────
     skip_annotation = false
     skip_pathway    = false
@@ -197,6 +203,28 @@ params {
     restore_published = true       // skip a step if its outputs already exist
 }
 ```
+
+### Reference annotation for the HVG benchmark
+
+Phase 4b of the HVG benchmark (marker-gene AUROC) scores each normalization
+against a fixed set of cell-type labels. By default those labels are the
+InSituType calls for the `none` normalization at 100% HVG
+(`annotation/1.0_HVG_none_annotation.csv`), which the pipeline produces itself.
+
+Because that file only exists when the annotation step runs, the combination
+`skip_annotation = true` + `skip_hvg_bench = false` requires an explicit
+reference:
+
+```groovy
+referenceAnnotation = '/path/to/1.0_HVG_none_annotation.csv'
+```
+
+The file must have cell IDs in the index column and labels in a `sup.clust`
+column (a single-column CSV also works). Setting it when the annotation step
+*does* run overrides the derived reference, which is useful for scoring
+against an external ground truth. If the combination is misconfigured, the
+run aborts before any process is scheduled with a message naming the three
+ways out.
 
 The `process { ... }` block at the bottom of the file controls resources and
 `module load` commands; adjust for your cluster.
