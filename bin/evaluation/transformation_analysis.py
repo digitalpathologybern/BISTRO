@@ -702,7 +702,7 @@ def run_transformation_pipeline(
     dataset_name : str, optional
         Name for the dataset. If None, inferred from the zarr filename.
     technology : str, optional
-        iST platform name ('CosMx', 'Xenium', 'MERFISH'). If None, set to 'unknown'.
+        iST platform name ('CosMx', 'Xenium', 'MERSCOPE'). If None, set to 'unknown'.
     pseudocounts : list of float, optional
         Pseudocount values for log transformation (default [0.01, 0.1, 0.5, 1, 10]).
     alpha : float, optional
@@ -909,7 +909,7 @@ def build_parser():
     p.add_argument("--dataset_name", default=None,
                    help="Dataset name (default: inferred from zarr path)")
     p.add_argument("--technology", default=None,
-                   help="iST platform (CosMx, Xenium, MERFISH)")
+                   help="iST platform (CosMx, Xenium, MERSCOPE)")
     p.add_argument("--pseudocounts", type=float, nargs="+",
                    default=[0.01, 0.1, 0.5, 1, 10],
                    help="Pseudocount values for log transformation")

@@ -134,7 +134,7 @@ def assign_fov(metadata_path, technology, output_dir):
     metadata_path : str
         Path to the metadata CSV from readZarr.
     technology : str
-        iST platform name ('CosMx', 'Xenium', 'MERFISH').
+        iST platform name ('CosMx', 'Xenium', 'MERSCOPE').
     output_dir : str
         Directory to write the enriched metadata and fov_info.json.
 
@@ -230,7 +230,7 @@ def build_parser():
     p.add_argument("--metadata", required=True,
                    help="Path to the metadata CSV from readZarr")
     p.add_argument("--technology", required=True,
-                   choices=["CosMx", "Xenium", "MERFISH"],
+                   choices=["CosMx", "Xenium", "MERSCOPE"],
                    help="iST platform")
     p.add_argument("--output_dir", required=True,
                    help="Directory to write enriched metadata and fov_info.json")

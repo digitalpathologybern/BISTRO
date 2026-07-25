@@ -127,7 +127,7 @@ def evaluate_batch_effect_single_layer(
     dataset_name : str
         Name of the dataset, used for labeling output rows.
     technology : str
-        iST platform name ('CosMx', 'Xenium', 'MERFISH').
+        iST platform name ('CosMx', 'Xenium', 'MERSCOPE').
     libsize_column : str, optional
         Column name for library size in obs (default 'library_size').
     tissue_column : str, optional
@@ -566,7 +566,7 @@ def run_batch_effect_pipeline(
     nextflow_output : str
         Path to the Nextflow output directory (containing norm/ subdirectory).
     technology : str
-        iST platform name ('CosMx', 'Xenium', 'MERFISH').
+        iST platform name ('CosMx', 'Xenium', 'MERSCOPE').
     tissue_annotation_path : str
         Path to tissue annotation file (.csv or .geojson).
     output_dir : str
@@ -837,7 +837,7 @@ def build_parser():
                    help="Path to the Nextflow output directory "
                         "(must contain a norm/ subdirectory)")
     p.add_argument("--technology", required=True,
-                   choices=["CosMx", "Xenium", "MERFISH"],
+                   choices=["CosMx", "Xenium", "MERSCOPE"],
                    help="iST platform")
     p.add_argument("--tissue_annotation", required=True,
                    help="Path to tissue annotation file (.csv or .geojson)")

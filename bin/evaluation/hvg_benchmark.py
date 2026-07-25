@@ -973,7 +973,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--nextflow_output", required=True,
                    help="Path to the Nextflow output directory")
     p.add_argument("--technology", required=True,
-                   choices=["CosMx", "Xenium", "MERFISH"],
+                   choices=["CosMx", "Xenium", "MERSCOPE"],
                    help="iST platform")
     p.add_argument("--dataset_name", default=None,
                    help="Dataset name (default: inferred from zarr path)")

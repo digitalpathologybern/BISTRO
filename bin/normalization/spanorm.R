@@ -91,7 +91,7 @@ if (technology == 'CosMx') {
         spatialCoordsNames = c("x_local_um", "y_local_um")
     )
     sampling <- 1
-} else if (technology == 'MERFISH') {
+} else if (technology == 'MERSCOPE') {
     spe <- SpatialExperiment(
         assay = list(counts = counts),
         colData = meta,

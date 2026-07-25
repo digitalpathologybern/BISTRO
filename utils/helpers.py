@@ -255,7 +255,7 @@ def get_fov_size(technology, scale=1):
     Parameters
     ----------
     technology : str
-        One of 'CosMx', 'Xenium', 'MERFISH'.
+        One of 'CosMx', 'Xenium', 'MERSCOPE'.
     scale : float
         Scaling factor applied to the FOV dimensions (default 1).
 
@@ -268,7 +268,7 @@ def get_fov_size(technology, scale=1):
         return [600 / scale, 720 / scale]
     elif technology == 'CosMx':
         return [510.72, 510.72]
-    elif technology == 'MERFISH':
+    elif technology == 'MERSCOPE':
         # TODO: verify MERSCOPE pixel size and derive FOV dimensions in um
         return [223 / scale, 223 / scale]
     else:
