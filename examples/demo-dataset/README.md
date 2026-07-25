@@ -6,8 +6,8 @@ to the manuscript data required**.
 
 It serves two purposes:
 
-1. **A runnable demo** — proves the installation works end to end.
-2. **A correctness check** — the simulation plants a known ground truth, so a
+1. **A runnable demo**: proves the installation works end to end.
+2. **A correctness check**: the simulation plants a known ground truth, so a
    run can be verified against what was injected rather than merely observed to
    finish.
 
@@ -69,10 +69,10 @@ This compares the run against `ground_truth.json` and exits non-zero if any
 check fails, so it can be used as a regression test. It distinguishes two
 kinds of result:
 
-* `[CHECK]` — a principled pass/fail: a hypothesis test, the sign of an
+* `[CHECK]` is a principled pass/fail: a hypothesis test, the sign of an
   effect, or whether a confidence interval covers the injected value. These
   determine the exit code.
-* `[INFO]` — a magnitude whose expected range has to be established from a
+* `[INFO]` is a magnitude whose expected range has to be established from a
   reference run. Reported, never failed on.
 
 The checks are described in the table below.
@@ -100,7 +100,7 @@ Headline numbers from that run:
 | Cell types | 5 | ARI = 1.000 |
 | Marker genes in top 25 % HVG | 40 planted | 26 recovered, 10 expected by chance (p = 1.2 × 10⁻⁹) |
 | Mean–variance slope, raw counts | NB, θ = 10 | 1.288 (→ −0.031 under log(x+0.5)) |
-| LRT for the FOV effect | — | p ≈ 0, ΔBIC = 1612.5 |
+| LRT for the FOV effect | n/a | p ≈ 0, ΔBIC = 1612.5 |
 
 Exact values will shift slightly with BLAS threading and package versions;
 the checks are written to tolerate that.
@@ -111,7 +111,7 @@ the checks are written to tolerate that.
 
 | File | Contents |
 |---|---|
-| `demo_filtered.zarr` | SpatialData archive, table `filtered` — the pipeline input |
+| `demo_filtered.zarr` | SpatialData archive, table `filtered`, the pipeline input |
 | `demo_tissue_annotations.csv` | tissue region per cell, the batch-effect model's fixed effect |
 | `demo_reference_profiles.csv` | genes × cell types, mean expression |
 | `demo_reference.RData` | the above as `profile_matrix`, for InSituType |
@@ -124,7 +124,7 @@ the generator, so the demo can be inspected without running anything.
 `demo_reference_profiles.csv` by `make_demo_reference.R`, since generating it
 requires R.
 
-`demo_output/` — the pipeline's results — is deliberately **not** committed. It
+`demo_output/`, the pipeline's results, is deliberately **not** committed. It
 is fully reproducible from the inputs above, it is two orders of magnitude
 larger than them, and it contains machine-specific paths, so a committed copy
 would generate noisy diffs and risk drifting out of sync with the code.
@@ -137,8 +137,8 @@ would generate noisy diffs and risk drifting out of sync with the code.
 convention, so `assignFOV` takes the native-FOV path), across 3 tissue regions
 and 5 cell types.
 
-Tissue regions are **concentric rings** about the slide centre — a tumour core,
-a stromal rim, an immune periphery — rather than bands. This matters more than
+Tissue regions are **concentric rings** about the slide centre (a tumour core,
+a stromal rim, an immune periphery) rather than bands. This matters more than
 it looks. The batch-effect model is
 `log_LS ~ C(tissue_annotations) + (1|FOV)`, and the drift analysis regresses
 the per-FOV random intercepts on the FOV index. Horizontal bands are nearly
@@ -196,14 +196,14 @@ recover.
 shrunk toward zero, and it is fitted on `log1p(library size)` rather than on
 the latent log size factor. `check_demo.py` therefore tests it against the
 sampling band that any variance estimate from *k* groups inherits,
-`(k−1)/χ²_{0.975,k−1}` … `(k−1)/χ²_{0.025,k−1}` — for k = 16 that is a ratio of
-0.55 to 2.40 — rather than against an arbitrary tolerance.
+`(k−1)/χ²_{0.975,k−1}` … `(k−1)/χ²_{0.025,k−1}`. For k = 16 that is a ratio of
+0.55 to 2.40, rather than against an arbitrary tolerance.
 
 **On drift: compare against the realised value, not the nominal one.** With
 only 16 FOVs the drift actually present in a given draw scatters widely around
 `DRIFT_SLOPE`. The generator therefore records `realised_drift_slope` and
-`realised_drift_pearson_r` — the regression of the simulated offsets `u_fov` on
-the FOV index — and those are what the pipeline can recover. The nominal
+`realised_drift_pearson_r`, the regression of the simulated offsets `u_fov` on
+the FOV index, and those are what the pipeline can recover. The nominal
 parameter is a property of the generative model; the realised value is a
 property of the data on disk.
 
@@ -217,7 +217,7 @@ the demonstration holds across seeds rather than depending on a lucky one.
 `bootstrap_var_ci()`, which resamples cells *within* each FOV while holding the
 FOV set fixed. It is therefore a **conditional** interval: the uncertainty in
 τ² given these 16 FOVs. That is the right question for characterising a single
-slide, which is what BISTRO is for — but it is *not* a confidence interval for
+slide, which is what BISTRO is for, but it is *not* a confidence interval for
 the population variance of the FOV offsets, because it carries no uncertainty
 about which 16 offsets were drawn. At k = 16 a population interval would span
 roughly ±70 %, while this one spans a few percent, so it will not generally
@@ -228,7 +228,7 @@ cover the injected value. `check_demo.py` reports it without failing on it.
 ## How the demo config differs from the manuscript settings
 
 `demo.config` is tuned for speed on a laptop and is **not** a template for real
-runs — copy from [`../../sample_configs/`](../../sample_configs/) instead.
+runs. Copy from [`../../sample_configs/`](../../sample_configs/) instead.
 
 | Parameter | Demo | Manuscript |
 |---|---|---|
@@ -266,7 +266,7 @@ Two are worth understanding before changing them:
 * **`FOV_GRID`** sets the number of groups the mixed-effects model estimates
   τ² from. Fewer FOVs means a noisier, more heavily shrunk estimate.
 * **`THETA`** is the negative-binomial dispersion. Lowering it increases
-  overdispersion and makes variance stabilisation harder — useful for
+  overdispersion and makes variance stabilisation harder, which is useful for
   stress-testing the transformation analysis.
 
 To simulate a rasterized platform instead, set `technology` to `Xenium` or

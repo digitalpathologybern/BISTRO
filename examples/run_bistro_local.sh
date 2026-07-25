@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# BISTRO — sample local launcher
+# BISTRO sample local launcher
 # ----------------------------------------------------------------------------
 # Runs the BISTRO Nextflow pipeline on a single machine 
 #

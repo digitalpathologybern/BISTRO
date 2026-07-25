@@ -1,0 +1,136 @@
+# ============================================================================
+# BISTRO -- exact Python lock file
+# ----------------------------------------------------------------------------
+# `pip freeze` from an environment built from envs/environment.yml and VERIFIED
+# end to end: the full pipeline ran on the demo dataset from this environment
+# and passed all 13 ground-truth checks.
+#
+# environment.yml pins BISTRO's direct dependencies and lets pip resolve the
+# rest. That is readable and maintainable, but resolvers move: this file fixes
+# every transitive version as well, for exact reproduction.
+#
+#     conda create -n bistro python=3.11.8 setuptools=69.1.0 numpy=1.26.4
+#     conda activate bistro
+#     pip install -r envs/requirements-lock.txt
+#
+# Note: numpy comes from conda (linked against conda-forge's OpenBLAS, as in
+# the manuscript environment), so install it with conda as shown above rather
+# than from this file.
+#
+# Verified on Rocky Linux 9.7, Python 3.11.8, x86_64.
+# ============================================================================
+aiobotocore==2.5.4
+aiohappyeyeballs==2.7.1
+aiohttp==3.14.3
+aioitertools==0.13.0
+aiosignal==1.4.0
+anndata==0.10.8
+array-api-compat==1.15.0
+asciitree==0.3.3
+attrs==26.1.0
+botocore==1.31.17
+certifi==2026.7.22
+charset-normalizer==3.4.9
+click==8.4.2
+cloudpickle==3.1.2
+colorcet==3.2.1
+contourpy==1.3.3
+cycler==0.12.1
+dask==2024.11.2
+dask-expr==1.1.19
+dask-image==2023.8.1
+datashader==0.19.1
+distributed==2024.11.2
+fasteners==0.20
+fonttools==4.63.0
+frozenlist==1.8.0
+fsspec==2023.6.0
+geopandas==1.0.0
+h5py==3.16.0
+idna==3.18
+igraph==0.11.8
+ImageIO==2.37.4
+importlib_metadata==9.0.0
+Jinja2==3.1.6
+jmespath==1.1.0
+joblib==1.5.3
+kiwisolver==1.5.0
+lazy-loader==0.5
+legacy-api-wrap==1.5
+leidenalg==0.10.2
+llvmlite==0.44.0
+locket==1.0.0
+markdown-it-py==4.2.0
+MarkupSafe==3.0.3
+matplotlib==3.9.0
+mdurl==0.1.2
+msgpack==1.2.1
+multidict==6.7.1
+multipledispatch==1.0.0
+multiscale_spatial_image==2.0.2
+natsort==8.4.0
+networkx==3.1
+numba==0.61.0
+numcodecs==0.12.1
+numpy @ file:///home/conda/feedstock_root/build_artifacts/numpy_1707225376651/work/dist/numpy-1.26.4-cp311-cp311-linux_x86_64.whl#sha256=d08e1c9e5833ae7780563812aa73e2497db1ee3bd5510d3becb8aa18aa2d0c7c
+ome-zarr==0.9.0
+packaging @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_packaging_1777103621/work
+pandas==2.2.3
+param==2.4.1
+partd==1.4.2
+patsy==1.0.2
+pillow==12.3.0
+PIMS==0.7
+platformdirs==4.11.0
+pooch==1.9.0
+propcache==0.5.2
+psutil==7.2.2
+pyarrow==16.1.0
+pyct==0.6.0
+Pygments==2.20.0
+pynndescent==0.6.0
+pyogrio==0.13.0
+pyparsing==3.3.2
+pyproj==3.7.2
+python-dateutil==2.9.0.post0
+python-igraph==0.11.8
+pytz==2026.3.post1
+PyYAML==6.0.3
+requests==2.34.2
+rich==15.0.0
+s3fs==2023.6.0
+scanpy==1.10.2
+scikit-image==0.24.0
+scikit-learn==1.5.0
+scipy==1.13.1
+seaborn==0.13.2
+session_info==1.0.1
+shapely==2.0.4
+six==1.17.0
+slicerator==1.1.0
+sortedcontainers==2.4.0
+spatial_image==1.1.0
+spatialdata==0.2.6
+statsmodels==0.14.2
+stdlib-list==0.12.0
+tblib==3.2.2
+texttable==1.7.0
+threadpoolctl==3.6.0
+tifffile==2026.3.3
+toolz==1.1.0
+tornado==6.5.7
+tqdm==4.66.4
+typing_extensions==4.16.0
+tzdata==2026.3
+umap-learn==0.5.7
+UpSetPlot==0.9.0
+urllib3==1.26.20
+wrapt==1.17.3
+xarray==2024.11.0
+xarray-dataclasses==1.9.1
+xarray-schema==0.0.3
+xarray-spatial==0.4.0
+yarl==1.24.5
+zarr==2.15.0
+zict==3.0.0
+zipp==4.1.0

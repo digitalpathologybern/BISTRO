@@ -3,7 +3,7 @@
 **B**ias **I**dentification in Image-based **S**patial **TR**anscript**O**mics
 
 BISTRO is a Nextflow (DSL2) pipeline that benchmarks 11 normalization methods on
-imaging-based spatial transcriptomics (iST) data — CosMx, Xenium, and MERSCOPE.
+imaging-based spatial transcriptomics (iST) data: CosMx, Xenium, and MERSCOPE.
 It runs every method in parallel, then evaluates each on FOV batch effects,
 mean–variance behaviour, HVG selection stability, and cell-type-annotation
 agreement, and finally bundles all metrics into a self-contained HTML report.
@@ -17,15 +17,16 @@ reproducible pipeline used to generate the results.
 
 1. [Pipeline overview](#pipeline-overview)
 2. [Repository layout](#repository-layout)
-3. [Requirements](#requirements)
+3. [System requirements](#system-requirements)
 4. [Installation](#installation)
-5. [Demo dataset](#demo-dataset)
+5. [Demo](#demo)
 6. [Input data](#input-data)
 7. [Configuration](#configuration)
-8. [Running the pipeline](#running-the-pipeline)
+8. [Instructions for use](#instructions-for-use)
 9. [Outputs](#outputs)
 10. [Resuming / caching](#resuming--caching)
-11. [License](#license)
+11. [Reproducing the manuscript results](#reproducing-the-manuscript-results)
+12. [License](#license)
 
 ---
 
@@ -78,15 +79,21 @@ All spatial coordinates are in **micrometers (µm)** throughout the pipeline.
 │   ├── data_loader.py         # SpatialData I/O, layers, FOV merging, tissue annotations
 │   └── helpers.py             # Stats helpers, FOV rasterization, layer-name parsing
 ├── envs/
-│   ├── environment.yml        # Conda env, exact build pins
-│   └── R_packages.csv         # All installed R packages and their versions
+│   ├── environment.yml               # Curated, installable Python env
+│   ├── requirements-lock.txt         # Exact pins, verified end to end
+│   ├── environment_full_export.yml   # Full conda export, provenance only
+│   ├── install_R_packages.R          # R dependency installer and checker
+│   └── R_packages.csv                # All 371 R packages, provenance only
 ├── examples/
 │   ├── run_bistro_local.sh    # Sample bash launcher (see below)
 │   └── demo-dataset/          # Self-contained simulated demo (see below)
 │       ├── make_demo_dataset.py
 │       ├── make_demo_reference.R
+│       ├── check_demo.py
 │       ├── demo.config
+│       ├── demo.cluster.config
 │       ├── run_demo.sh
+│       ├── run_demo_slurm.sbatch
 │       └── ground_truth.json
 ├── LICENSE
 ├── .gitignore
@@ -95,84 +102,325 @@ All spatial coordinates are in **micrometers (µm)** throughout the pipeline.
 
 ---
 
-## Requirements
+## System requirements
 
-| Component | Version | Notes |
-|---|---|---|
-| Nextflow | ≥ 23.04 | DSL2 |
-| Java     | ≥ 17    | required by Nextflow |
-| Python   | 3.11    | conda env provided |
-| R        | ≥ 4.4   | with Bioconductor 3.20 |
+### Operating system
 
-The exact dependency manifests used to produce the manuscript results are
-committed to this repo under `envs/`:
+BISTRO is a Nextflow pipeline and has no OS-specific code, but it has only
+been tested on Linux.
 
-| File | What it captures |
+| | |
 |---|---|
-| `envs/environment.yml` | full Conda env (`conda env export --no-builds`) — every package and version |
-| `envs/R_packages.csv`  | all R packages installed in the manuscript environment, with versions |
+| **Tested on** | Rocky Linux 9.7 (Blue Onyx), kernel 5.14.0, x86_64 |
+| Expected to work | Any x86_64 Linux with the dependencies below; macOS (Intel or Apple silicon), untested |
+| Windows | Not supported directly. Use WSL2 with a Linux distribution, untested |
+
+### Core software
+
+| Component | Minimum | Tested with |
+|---|---|---|
+| Nextflow | 23.04 (DSL2) | **24.04.4** |
+| Java | 11 | **11.0.20** and **17.0.6** |
+| Python | 3.11 | **3.11.8** |
+| R | 4.4 | **4.4.2** |
+| Bioconductor | 3.20 | **3.20** |
+
+### Python packages
+
+Installed from [`envs/environment.yml`](envs/environment.yml), a curated list
+of BISTRO's direct dependencies. For byte-exact reproduction,
+[`envs/requirements-lock.txt`](envs/requirements-lock.txt) additionally pins
+all 115 transitive packages, captured from an environment that was verified end
+to end. [`envs/environment_full_export.yml`](envs/environment_full_export.yml)
+is the full development environment, kept as a provenance record only — it is
+not installable (see the header of `environment.yml` for why).
+
+| Package | Version | | Package | Version |
+|---|---|---|---|---|
+| numpy | 1.26.4 | | scanpy | 1.10.2 |
+| pandas | 2.2.3 | | statsmodels | 0.14.2 |
+| scipy | 1.13.1 | | scikit-learn | 1.5.0 |
+| anndata | 0.10.8 | | matplotlib | 3.9.0 |
+| spatialdata | 0.2.6 | | geopandas | 1.0.0 |
+| zarr | 2.15.0 | | shapely | 2.0.4 |
+| numcodecs | 0.12.1 | | python-igraph | 0.11.8 |
+| xarray | 2024.11.0 | | leidenalg | 0.10.2 |
+| tqdm | 4.66.4 | | upsetplot | 0.9.0 |
+
+> **On pandas.** The development environment recorded pandas 2.0.0, but that
+> combination cannot be re-resolved: `spatialdata 0.2.6` requires
+> `xarray>=2024.10.0`, which requires `pandas>=2.1`. pip does not re-check
+> constraints after installation, so the original environment runs despite
+> violating them. The published environment pins **pandas 2.2.3**, the nearest
+> version satisfying the whole dependency graph. The pipeline was re-run on the
+> demo dataset with it and passes all 13 ground-truth checks.
+
+### R packages
+
+Full manifest of all 371 packages in
+[`envs/R_packages.csv`](envs/R_packages.csv). The ones that matter:
+
+| Package | Version | Role |
+|---|---|---|
+| SpaNorm | 1.0.0 | spatially aware normalization |
+| InSituType | 2.0 | cell-type annotation |
+| scran | 1.34.0 | pooling-based size factors |
+| DESeq2 | 1.46.0 | median-of-ratios size factors |
+| edgeR | 4.4.2 | TMM size factors |
+| Seurat | 5.5.0 | SCTransform |
+| sctransform | 0.4.3 | regularized negative binomial |
+| SingleCellExperiment | 1.28.1 | data structure |
+| SpatialExperiment | 1.16.0 | data structure |
+| limma | 3.62.2 | linear modelling |
+| GOfuncR | 1.26.0 | pathway analysis (optional) |
+| msigdbr | 26.1.0 | gene sets (optional) |
+
+### System libraries
+
+Several R packages link against C/C++ libraries that must be present at
+**load** time, not just at install time. When one is missing the R package
+installs fine and then fails to load, which is easy to misread as a missing
+package.
+
+| Library | Needed by | Debian/Ubuntu | Symptom if absent |
+|---|---|---|---|
+| GLPK | igraph → Seurat, scran | `libglpk-dev` | `libglpk.so.40: cannot open shared object file` |
+| ImageMagick (Magick++) | magick → SpatialExperiment | `libmagick++-dev` | `libMagick++-7...: cannot open shared object file` |
+| libxml2 | XML, xml2 | `libxml2-dev` | fails at install |
+| GDAL, PROJ, GEOS | sf, terra | `libgdal-dev libproj-dev libgeos-dev` | fails at install |
+| UDUNITS | units → sf | `libudunits2-dev` | fails at install |
+| ICU | stringi | `libicu-dev` | fails at install |
+
+Check all R dependencies, and distinguish "not installed" from "installed but
+not loadable", with:
+
+```bash
+Rscript envs/install_R_packages.R --check
+```
+
+On a module-based HPC these are usually just modules you have not loaded; see
+[`examples/demo-dataset/demo.cluster.config`](examples/demo-dataset/demo.cluster.config)
+for the exact set used here.
+
+### Hardware
+
+**No non-standard hardware is required.** There is no GPU code path, and no
+dependency on any accelerator, interconnect, or specialised storage. Any
+x86_64 machine will do.
+
+Memory is the binding constraint, and it scales with cells × genes:
+
+| Workload | Cores | Memory | Disk |
+|---|---|---|---|
+| **Demo** (2,000 cells × 200 genes) | 2–4 | **8 GB** is ample; measured peak 2.8 GB | ~200 MB |
+| Small panel (~10⁵ cells × 300–1,000 genes) | 4–8 | 32–64 GB | ~50 GB |
+| Manuscript datasets (up to ~10⁶ cells × 18,000 genes) | 6+ | **256 GB**, and **768 GB** for scran and SpaNorm | 100–400 GB per dataset |
+
+The demo runs comfortably on any modern laptop. The manuscript datasets do
+not: they were run on an HPC cluster, and the memory figures above are the
+values requested in [`sample_configs/`](sample_configs/). Normalized matrices
+are written as dense CSV, which is what drives the disk figures. A single
+18k-plex layer is 20–32 GB.
 
 ---
 
 ## Installation
 
+There is nothing to compile: BISTRO is a Nextflow workflow over Python and R
+scripts. Installation is entirely a matter of providing the interpreters and
+their packages.
+
+### 1. Clone
+
 ```bash
-# 1. Clone
 git clone https://github.com/digitalpathologybern/BISTRO.git
 cd BISTRO
+```
 
-# 2. Install Nextflow (or load a cluster module: `module load Nextflow`)
+### 2. Nextflow and Java
+
+```bash
 curl -s https://get.nextflow.io | bash
 chmod +x nextflow && sudo mv nextflow /usr/local/bin/
+```
 
-# 3. Recreate the Python conda environment.
+On a cluster, `module load Nextflow` instead. Nextflow needs Java 11 or newer
+already on `PATH`.
+
+### 3. System libraries
+
+Install the libraries listed under
+[System libraries](#system-libraries) *before* the R packages, since several will
+not build without them. On Debian/Ubuntu:
+
+```bash
+sudo apt-get install -y libglpk-dev libmagick++-dev libxml2-dev \
+    libgdal-dev libproj-dev libgeos-dev libudunits2-dev libicu-dev
+```
+
+### 4. Python environment
+
+```bash
 conda env create -n bistro -f envs/environment.yml
 conda activate bistro
-
-# 4. Install the R / Bioconductor packages listed in envs/R_packages.csv.
-#    BiocManager will resolve CRAN + Bioconductor packages; GitHub-only
-#    packages (InSituType, SpatialPCA, SeuratWrappers, scGSVA) must be
-#    installed manually via remotes::install_github().
-Rscript -e '
-  if (!requireNamespace("BiocManager", quietly = TRUE)) install.packages("BiocManager")
-  pkgs <- read.csv("envs/R_packages.csv", stringsAsFactors = FALSE)$Package
-  BiocManager::install(pkgs, ask = FALSE, update = FALSE)
-'
 ```
+
+Takes about 2 minutes. For byte-exact reproduction of the verified
+environment, install from the lock file instead:
+
+```bash
+conda create -n bistro python=3.11.8 setuptools=69.1.0 numpy=1.26.4
+conda activate bistro
+pip install -r envs/requirements-lock.txt
+```
+
+### 5. R packages
+
+```bash
+Rscript envs/install_R_packages.R
+```
+
+This installs the pipeline's direct dependencies from CRAN and Bioconductor
+and pulls InSituType from GitHub; CRAN and Bioconductor resolve the transitive
+dependencies. Add `--optional` to include `scGSVA`, needed only for the GSVA
+step that is disabled by default.
+
+`envs/R_packages.csv` records all 371 packages present in the environment that
+produced the manuscript results. It is a provenance record, not an install
+list. Installing the direct dependencies is faster and less brittle.
+
+### 6. Verify
+
+```bash
+Rscript envs/install_R_packages.R --check
+```
+
+This distinguishes "not installed" from "installed but will not load", the
+latter being a missing system library rather than a missing R package. Then
+run the [demo](#demo), which exercises every stage end to end.
+
+### Typical install time
+
+On a normal desktop with a broadband connection:
+
+| Step | Time |
+|---|---|
+| Clone | seconds |
+| Nextflow + Java | 1–2 min |
+| System libraries | 1–3 min |
+| Conda environment | **~2 min** (measured: 1 m 37 s / 1 m 38 s) |
+| R packages | **1–3 hours** |
+| **Total** | **roughly 1.5–3.5 hours**, nearly all of it R |
+
+The R step dominates and varies enormously with what CRAN and Bioconductor
+ship as binaries for your platform. On Linux, `BiocManager` builds most
+packages from source, and Seurat, DESeq2 and their dependency trees are the slow
+part. On macOS and Windows, binaries are usually available and the step drops
+to 15–30 minutes. If you already have a Bioconductor 3.20 installation, it can
+be minutes.
+
 ---
 
-## Demo dataset
+## Demo
 
 A self-contained, fully simulated dataset lives in
-[`examples/demo-dataset/`](examples/demo-dataset/). It runs the entire pipeline
-on a single machine in minutes and needs no access to the manuscript data.
+[`examples/demo-dataset/`](examples/demo-dataset/). It exercises every stage of
+the pipeline on one machine in minutes and needs no access to the manuscript
+data, which is far too large to serve as a demo.
+
+The inputs are committed to the repository (~830 KB), so they can be inspected
+without running anything, and they are also reproducible from the generator at
+a fixed seed.
+
+### Instructions
 
 ```bash
 conda activate bistro
 bash examples/demo-dataset/run_demo.sh
 ```
 
-That regenerates the inputs, builds the InSituType reference, and runs
-BISTRO end to end, leaving the report at
-`examples/demo-dataset/demo_output/BISTRO_report.html`. A verified run takes
-about 9 minutes on 4 cores and peaks at 2.8 GB.
+That runs four steps: generate the simulated inputs, build the InSituType
+reference, run BISTRO, and verify the output against the injected ground
+truth. It exits non-zero if any check fails.
 
-On an HPC cluster, submit it rather than running it on a login node:
+On an HPC cluster, submit it as a job rather than running it on a login node:
 
 ```bash
 sbatch examples/demo-dataset/run_demo_slurm.sbatch
 ```
 
-The simulation is not arbitrary: it plants a **known ground truth** — a per-FOV
-library-size offset of known variance, a systematic decline in that offset
-across the acquisition order, a designated set of marker genes, and five cell
-types — and writes the realised values to `ground_truth.json`. A demo run can
-therefore be checked for correctness, not merely for completing.
-[`examples/demo-dataset/README.md`](examples/demo-dataset/README.md) lists what
-to compare against what.
+That variant layers
+[`demo.cluster.config`](examples/demo-dataset/demo.cluster.config) on top of
+`demo.config` to load environment modules per process, and runs the whole demo
+inside a single allocation.
 
-The demo doubles as the executable specification of the input schema described
-in the next section.
+### Expected run time
+
+| | |
+|---|---|
+| **Wall time** | **9 min 03 s** |
+| Hardware | 4 cores of an AMD EPYC 7742, 16 GB allocated |
+| Peak memory | 2.8 GB |
+| Nextflow tasks | 54 |
+| Disk written | ~163 MB |
+
+Measured on Rocky Linux 9.7 with the versions listed above. Peak memory stayed
+well under the 16 GB allocated, so 8 GB is sufficient; expect a broadly
+similar wall time on any current 4-core desktop.
+
+Both entry points have been verified end to end on this dataset:
+`run_demo.sh` and `run_demo_slurm.sbatch` each complete with 13 of 13 checks
+passing.
+
+### Expected output
+
+Results land in `examples/demo-dataset/demo_output/`:
+
+| Path | Contents |
+|---|---|
+| `BISTRO_report.html` | self-contained HTML report, ~1.1 MB |
+| `norm/` | the 11 normalized count matrices |
+| `hvg/` | per-method HVG tables and selections |
+| `annotation/` | InSituType calls per normalization |
+| `evaluation/batch_effect/` | τ², LRT, drift statistics |
+| `evaluation/transformation/` | mean–variance slopes |
+| `evaluation/hvg_benchmark/` | clustering stability, coherence, AUROC |
+| `evaluation/annotation_agreement/` | pairwise ARI between normalizations |
+
+The verification step prints a pass/fail line per check and ends with a
+summary. A correct run reports **13 passed, 0 failed**:
+
+```
+  [CHECK] PASS  All 11 normalization layers produced
+  [CHECK] PASS  FOV batch effect is detected (LRT)
+            lrt_pvalue = 0.000e+00 (injected var(u_fov) = 0.04580)
+  [CHECK] PASS  tau^2 is within the sampling band implied by the FOV count
+            REML 0.04084 vs injected 0.04580 (ratio 0.89)
+  [CHECK] PASS  Acquisition drift recovered with the injected sign
+            realised slope -0.02331/FOV, recovered -0.02190
+  [CHECK] PASS  HVG selection is enriched for the planted markers
+            26/40 markers in the top 0.25 (50 genes); p = 1.166e-09
+  [CHECK] PASS  Annotation recovers the simulated cell types
+            ARI = 1.000 over 2000 cells
+  ...
+  13 passed, 0 failed, 2 informational, 0 skipped
+```
+
+Exact numbers shift slightly with BLAS threading and package versions; the
+checks are written to tolerate that.
+
+### Why the ground truth matters
+
+The simulation is not arbitrary. It plants a per-FOV library-size offset of
+known variance, a systematic decline in that offset across the acquisition
+order, 40 marker genes carrying the between-cell-type variance, and five cell
+types, then records the realised values in `ground_truth.json`. A demo run is
+therefore checked for **correctness**, not merely for completing.
+[`examples/demo-dataset/README.md`](examples/demo-dataset/README.md) documents
+each check and the statistical reasoning behind its pass criterion.
+
+The demo also doubles as the executable specification of the input schema in
+the next section.
 
 ---
 
@@ -193,10 +441,10 @@ Every dataset needs three files (four with a GeoJSON annotation):
 | H&E alignment matrix | only with a GeoJSON annotation | maps H&E pixels to image pixels |
 
 `examples/demo-dataset/make_demo_dataset.py` is a working, runnable
-implementation of everything below — when this document and that script
+implementation of everything below. When this document and that script
 disagree, the script is correct.
 
-### 1. `filtered.zarr` — schema
+### 1. `filtered.zarr` schema
 
 A [SpatialData](https://spatialdata.scverse.org) zarr archive. Only the table
 is read; images, shapes and points are ignored (shape centroids are consulted
@@ -209,7 +457,7 @@ only as a last-resort fallback for coordinates).
 | `tables['filtered']` | **yes** | the AnnData that the whole pipeline operates on |
 | `tables['table']` | no | if present, re-indexed alongside `filtered` for MERSCOPE `EntityID` data |
 
-**`X` — the expression matrix**
+**`X`: the expression matrix**
 
 * **Raw integer counts**, cells × genes. Dense or `scipy.sparse`; both are handled.
 * **Must not be normalized or log-transformed.** Every method starts from these
@@ -218,7 +466,7 @@ only as a last-resort fallback for coordinates).
 * Negative-control probes should already be **removed** from `X`; their
   per-cell total is carried in `obs` instead (see `total_counts_Negative`).
 
-**`var` — genes**
+**`var`: genes**
 
 * `var_names` holds gene symbols and must be unique.
 * Symbols must overlap the scRNA-seq reference's row names, or annotation
@@ -228,7 +476,7 @@ only as a last-resort fallback for coordinates).
   substitutions in `bin/plotters/hvg_upset_plot.py`). Symbols free of those
   characters are safest.
 
-**`obs` — the index**
+**`obs`: the index**
 
 Cell IDs, unique and stable. They are the join key between the expression
 matrix, the enriched metadata, the tissue annotation and every annotation
@@ -236,7 +484,7 @@ output, so they must survive a CSV round-trip unchanged. If an `EntityID`
 column is present (the MERSCOPE convention) it is promoted to the index
 automatically.
 
-**`obs` — required columns**
+**`obs`: required columns**
 
 All coordinates are in **micrometers**; there is no unit conversion anywhere in
 the pipeline.
@@ -245,9 +493,9 @@ the pipeline.
 |---|---|---|
 | `x_local_um`, `y_local_um` | float | pseudo-FOV rasterization; SpaNorm coordinates on Xenium/MERSCOPE |
 | `x_global_um`, `y_global_um` | float | SpaNorm coordinates on CosMx; GeoJSON point-in-polygon; spatial plots |
-| `area_um2` | float | `areaNorm` size factors — this method has no toggle, so the column is always required |
+| `area_um2` | float | `areaNorm` size factors. This method has no toggle, so the column is always required |
 
-**`obs` — conditionally required**
+**`obs`: conditionally required**
 
 | Column | When | Notes |
 |---|---|---|
@@ -269,7 +517,7 @@ Two accepted forms, selected by file extension:
 
 | Extension | Expected contents |
 |---|---|
-| `.RData` | an object named exactly **`profile_matrix`** — genes × cell types, mean expression on the linear scale |
+| `.RData` | an object named exactly **`profile_matrix`**, genes × cell types, mean expression on the linear scale |
 | `.rds` | a Seurat object with a `CellType` column; profiles are built with `AggregateExpression` |
 
 ### 3. Tissue annotation
@@ -371,13 +619,70 @@ The `process { ... }` block at the bottom of the file controls resources and
 
 ---
 
-## Running the pipeline
+## Instructions for use
 
-### Local / single-machine
+### Running BISTRO on your own data
+
+**1. Prepare the inputs.** You need three files, described in full under
+[Input data](#input-data):
+
+- a quality-controlled `filtered.zarr`. BISTRO does no filtering of its own,
+  so cell and gene QC must already be done
+- an scRNA-seq reference (`.RData` holding `profile_matrix`, or a Seurat
+  `.rds`), unless you set `skip_annotation = true`
+- a tissue annotation (`.csv` or QuPath `.geojson`)
+
+The single most common failure is a zarr that does not carry the required
+`obs` columns. Check yours before launching a long run:
+
+```python
+import spatialdata as sd
+obs = sd.SpatialData.read("my_filtered.zarr").tables["filtered"].obs
+required = ["x_local_um", "y_local_um", "x_global_um", "y_global_um", "area_um2"]
+print("missing:", [c for c in required if c not in obs.columns])
+# plus 'total_counts_Negative' if you will run annotation,
+# and 'fov' for platforms with native FOVs
+```
+
+[`examples/demo-dataset/make_demo_dataset.py`](examples/demo-dataset/make_demo_dataset.py)
+builds a schema-correct archive from scratch and is the reference to copy
+from.
+
+**2. Copy the closest sample config and edit the paths.** Start from the entry
+in [`sample_configs/`](sample_configs/) matching your platform, since
+`technology`, `pixelSize`, `separate_fovs` and `add_global` are already set
+appropriately there:
 
 ```bash
-nextflow run run_BISTRO.nf -c sample_configs/xenium-cancerBreast-5k.config
+cp sample_configs/xenium-cancerBreast-5k.config my_dataset.config
 ```
+
+Then edit, at minimum: `zarrFile`, `scReferenceFile`, `tissueAnnotation`,
+`datasetName`, `output_folder_path`, `workDir` and `color_list`. Every
+parameter is documented in [Configuration](#configuration).
+
+**3. Size the resources.** The `process` block memory in the sample configs is
+set for datasets of up to ~10⁶ cells × 18,000 genes. For a smaller panel,
+reduce it; see the table under [Hardware](#hardware).
+
+**4. Run.**
+
+```bash
+nextflow run run_BISTRO.nf -c my_dataset.config
+```
+
+On a cluster, add an executor and per-label environment setup. The pattern is
+in [`examples/demo-dataset/demo.cluster.config`](examples/demo-dataset/demo.cluster.config),
+which can be layered on with a second `-c` so the dataset config stays free of
+site-specific settings:
+
+```bash
+nextflow run run_BISTRO.nf -c my_dataset.config -c my_cluster.config
+```
+
+**5. Read the report.** `output_folder_path/BISTRO_report.html` is
+self-contained and collects every figure and table; see
+[Outputs](#outputs) for the directory layout.
 
 ### Reproducible bash launcher
 
@@ -393,6 +698,17 @@ bash my_run.sh
 The launcher pins per-run `workDir` and Nextflow cache so multiple datasets do
 not collide, and it forwards exit codes so it is safe to wrap in `cron`,
 `tmux`, or your own scheduler.
+
+### Common problems
+
+| Symptom | Cause |
+|---|---|
+| `No such variable: referenceAnnotationPath` | fixed; update to the current revision |
+| `Unknown technology: ...` | `technology` must be exactly `CosMx`, `Xenium` or `MERSCOPE` |
+| R package "not found" that is definitely installed | a missing system library, not a missing package. Run `Rscript envs/install_R_packages.R --check` |
+| `Importing the numpy C-extensions failed` | `PYTHONPATH` from environment modules is shadowing the conda env; clear it (`env -u PYTHONPATH ...`) |
+| Annotation step fails on missing `total_counts_Negative` | add the column, or set `skip_annotation = true` |
+| `module load CMake` not found | only the pathway step does this; set `skip_pathway = true` off-cluster |
 
 ---
 
@@ -425,7 +741,7 @@ sub-directory names declared in the config:
 
 The pipeline caches as:
 
-**`restore_published = true`** (default) — each process checks
+**`restore_published = true`** (default): each process checks
    `params.output_folder_path/<step>/` *before* running and short-circuits via
    symlinks if the expected output already exists. Set `restore_published =
    false` in the config to force a clean recomputation.
@@ -435,9 +751,102 @@ folder.
 
 ---
 
+## Reproducing the manuscript results
+
+Every quantitative result in the manuscript comes from running this pipeline
+once per dataset, with the config committed here. There are no manual steps
+between the pipeline output and the reported numbers.
+
+> **Data availability.** The processed `filtered.zarr` archives, scRNA-seq
+> references and tissue annotations are deposited at
+> **[GEO accession, to be added on submission]**. The paths in
+> `sample_configs/` point at the internal locations used during development;
+> repoint `zarrFile`, `scReferenceFile`, `tissueAnnotation`,
+> `output_folder_path` and `workDir` at your copy of the deposited data.
+
+### The 20 datasets
+
+| Config | `datasetName` | Platform | Panel | Tissue |
+|---|---|---|---|---|
+| `cosmx-crc-18k-11.config` | CosMx-ColonCancer-11-18k | CosMx | 18k | Colon |
+| `cosmx-crc-18k-12.config` | CosMx-ColonCancer-12-18k | CosMx | 18k | Colon |
+| `cosmx-crc-18k-21.config` | CosMx-ColonCancer-21-18k | CosMx | 18k | Colon |
+| `cosmx-crc-18k-22.config` | CosMx-ColonCancer-22-18k | CosMx | 18k | Colon |
+| `cosmx-crc-18k-23.config` | CosMx-ColonCancer-23-18k | CosMx | 18k | Colon |
+| `cosmx-crc-18k-24.config` | CosMx-ColonCancer-24-18k | CosMx | 18k | Colon |
+| `cosmx-cancerLiver-1k.config` | CosMx-LiverCancer-1k | CosMx | 1k | Liver (cancer) |
+| `cosmx-normalLiver-1k.config` | CosMx-NormalLiver-1k | CosMx | 1k | Liver (normal) |
+| `cosmx-normalPancreas-18k.config` | CosMx-Pancreas-18k | CosMx | 18k | Pancreas |
+| `cosmx-normalPrefrontalCortex.config` | CosMx-PrefrontallCortex-6k | CosMx | 6k | Prefrontal cortex |
+| `TMA_1404.config` | TMA1404 | CosMx | n/a | CRC liver-metastasis TMA |
+| `merscope-brain-1k.config` | MERSCOPE-Brain-1k | MERSCOPE | 1k | Brain |
+| `merscope-coloncancer-500-p1.config` | MERSCOPE-ColonCancer-P1-500 | MERSCOPE | 500 | Colon |
+| `merscope-livercancer-500-p1.config` | MERSCOPE-LiverCancer-P1-500 | MERSCOPE | 500 | Liver |
+| `merscope-lungcancer-500-p1.config` | MERSCOPE-LungCancer-P1-500 | MERSCOPE | 500 | Lung |
+| `xenium-cancerBreast-5k.config` | Xenium-CancerBreast-5k | Xenium | 5k | Breast |
+| `xenium-cancerBreastS1R1.config` | Xenium-CancerBreast-S1R1-300 | Xenium | 300 | Breast |
+| `xenium-cancerBreastS1R2.config` | Xenium-CancerBreast-S1R2-300 | Xenium | 300 | Breast |
+| `xenium-cancerBreastS2.config` | Xenium-CancerBreast-S2-300 | Xenium | 300 | Breast |
+| `xenium-normalColon-300.config` | Xenium-HealthyColon-300 | Xenium | 300 | Colon |
+
+`hvgThreshold = '0.75'` throughout. CosMx datasets use
+`separate_fovs = '1'` and `add_global = '1'`; MERSCOPE and Xenium use `'0'`
+and `'0'`. Three configs deviate deliberately:
+
+- **`xenium-cancerBreast-5k.config`**: `separate_fovs = '1'` with
+  `add_global = '0'`, the only Xenium dataset run per-FOV, because of the
+  5,000-plex panel size.
+- **`TMA_1404.config`**: the only one with `skip_hvg_bench = true` and with
+  `vc_column = 'patient'`, since a TMA carries multiple patients per slide.
+- **`cosmx-cancerLiver-1k.config`**: the only one setting
+  `restore_published = true` explicitly.
+
+### scRNA-seq references
+
+| Reference | Used by |
+|---|---|
+| `ColonCRC.RData` | the six CosMx colon datasets, MERSCOPE-ColonCancer, Xenium-HealthyColon |
+| `BreastCancer_Wu.RData` | all four Xenium breast datasets |
+| `HCC_reference.RData` | CosMx-LiverCancer-1k, MERSCOPE-LiverCancer |
+| `Brain_AllenBrainAtlas.RData` | CosMx-PrefrontalCortex, MERSCOPE-Brain |
+| `Liver_HCA.RData` | CosMx-NormalLiver-1k |
+| `Pancreas_HCA.RData` | CosMx-Pancreas-18k |
+| `LungCancer.RData` | MERSCOPE-LungCancer |
+| `LiuX_CRC_LiverMet_Reference_Profile.RData` | TMA1404 |
+
+### Running them
+
+One invocation per dataset:
+
+```bash
+for cfg in sample_configs/*.config; do
+    nextflow run run_BISTRO.nf -c "$cfg"
+done
+```
+
+In practice these were submitted individually, because a single 18k-plex dataset
+needs up to 768 GB for the scran and SpaNorm steps and produces 100–400 GB of
+intermediate matrices, so running all 20 concurrently is not realistic. Budget
+several hours to a day per large dataset.
+
+### Where each result comes from
+
+| Manuscript section | Output |
+|---|---|
+| §2.2 FOV batch effect (τ², LRT, drift) | `evaluation/batch_effect/<datasetName>_batch_effect_summary.csv` |
+| §2.3 Transformation / mean–variance | `evaluation/transformation/<datasetName>_transformation_summary.csv` |
+| §2.4 HVG selection benchmark | `evaluation/hvg_benchmark/` |
+| §2.4 Annotation agreement | `evaluation/annotation_agreement/<datasetName>_pairwise_ari_0.75.csv` |
+| All figures | `BISTRO_report.html`, plus the per-step `plots/` directory |
+
+Cross-dataset summary figures aggregate the per-dataset CSVs above over all 20
+runs.
+
+---
+
 ## License
 
-Released under the MIT License — see [`LICENSE`](LICENSE).
+Released under the MIT License. See [`LICENSE`](LICENSE).
 
 BISTRO orchestrates third-party normalization methods that carry their own
 licenses (among them edgeR, DESeq2, scran, SpaNorm, Seurat/SCTransform and

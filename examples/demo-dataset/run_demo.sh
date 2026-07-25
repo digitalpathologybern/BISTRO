@@ -42,26 +42,45 @@ if [ "${missing}" -ne 0 ]; then
 fi
 
 # ---- 1. Generate the simulated inputs --------------------------------------
-echo "==> [1/3] Generating the simulated dataset"
-python "${DEMO_DIR}/make_demo_dataset.py" --output_dir "${DEMO_DIR}"
+# PYTHONPATH is cleared for every Python call below. On systems with
+# environment modules, R's spatial dependencies (GDAL in particular) put their
+# own site-packages on PYTHONPATH, and a conda interpreter honours it: the
+# result is that Python imports a numpy built for a different interpreter and
+# dies with "Importing the numpy C-extensions failed". Clearing it costs
+# nothing on a normal desktop, where PYTHONPATH is usually unset anyway.
+echo "==> [1/4] Generating the simulated dataset"
+env -u PYTHONPATH python "${DEMO_DIR}/make_demo_dataset.py" --output_dir "${DEMO_DIR}"
 echo
 
 # ---- 2. Convert the reference profiles to the .RData InSituType expects -----
-echo "==> [2/3] Building the InSituType reference"
+echo "==> [2/4] Building the InSituType reference"
 Rscript "${DEMO_DIR}/make_demo_reference.R" \
     "${DEMO_DIR}/demo_reference_profiles.csv" \
     "${DEMO_DIR}/demo_reference.RData"
 echo
 
 # ---- 3. Run the pipeline ---------------------------------------------------
-echo "==> [3/3] Running BISTRO"
+# PYTHONPATH is cleared here too, not just for the calls above: Nextflow hands
+# its environment to every task it spawns, so a polluted PYTHONPATH would
+# otherwise resurface inside the pipeline processes rather than in this script.
+echo "==> [3/4] Running BISTRO"
 cd "${REPO_DIR}"
-nextflow run "${REPO_DIR}/run_BISTRO.nf" -c "${DEMO_DIR}/demo.config"
+env -u PYTHONPATH nextflow run "${REPO_DIR}/run_BISTRO.nf" -c "${DEMO_DIR}/demo.config"
+echo
+
+# ---- 4. Verify against the injected ground truth ----------------------------
+echo "==> [4/4] Verifying outputs against the ground truth"
+env -u PYTHONPATH python "${DEMO_DIR}/check_demo.py" \
+    --demo_dir "${DEMO_DIR}" \
+    --output_dir "${DEMO_DIR}/demo_output"
+VERIFY_EXIT=$?
 
 echo
 echo "Demo complete."
 echo "  report        : ${DEMO_DIR}/demo_output/BISTRO_report.html"
 echo "  ground truth  : ${DEMO_DIR}/ground_truth.json"
+echo "  verification  : exit ${VERIFY_EXIT} (0 = all checks passed)"
 echo
-echo "Compare the run against the injected ground truth as described in"
-echo "  ${DEMO_DIR}/README.md"
+echo "The checks are explained in ${DEMO_DIR}/README.md"
+
+exit ${VERIFY_EXIT}
