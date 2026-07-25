@@ -819,6 +819,11 @@ process generate_report {
 // ============================================================================
 params.restore_published = params.restore_published ?: true
 
+// Optional: an external reference annotation for the HVG benchmark. Declared
+// here so configs that omit it do not trigger Nextflow's "access to undefined
+// parameter" warning; see the validation at the top of the workflow body.
+params.referenceAnnotation = params.containsKey('referenceAnnotation') ? params.referenceAnnotation : ''
+
 workflow {
 
     // ---- Parameters (existing) ----

@@ -42,4 +42,20 @@ slurm_logs/
 !envs/*.txt
 !envs/*.sh
 
+# Demo dataset
+# The simulated inputs are tiny (~100 KB) and are committed on purpose, so the
+# demo can be inspected without running the generator. Re-including the zarr
+# directory itself is enough: nothing inside it is named *.zarr, so no pattern
+# above matches its contents.
+!examples/demo-dataset/demo_filtered.zarr/
+
+# demo_reference.RData is derived from demo_reference_profiles.csv by
+# make_demo_reference.R, so it stays ignored and is rebuilt by run_demo.sh.
+
+# Demo run outputs
+examples/demo-dataset/demo_output/
+
+# SLURM job logs from run_demo_slurm.sbatch (written to the submission dir)
+bistro-demo-*.out
+
 

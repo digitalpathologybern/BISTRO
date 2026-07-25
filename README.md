@@ -19,12 +19,13 @@ reproducible pipeline used to generate the results.
 2. [Repository layout](#repository-layout)
 3. [Requirements](#requirements)
 4. [Installation](#installation)
-5. [Input data](#input-data)
-6. [Configuration](#configuration)
-7. [Running the pipeline](#running-the-pipeline)
-8. [Outputs](#outputs)
-9. [Resuming / caching](#resuming--caching)
-10. [Citation](#citation)
+5. [Demo dataset](#demo-dataset)
+6. [Input data](#input-data)
+7. [Configuration](#configuration)
+8. [Running the pipeline](#running-the-pipeline)
+9. [Outputs](#outputs)
+10. [Resuming / caching](#resuming--caching)
+11. [License](#license)
 
 ---
 
@@ -80,7 +81,14 @@ All spatial coordinates are in **micrometers (µm)** throughout the pipeline.
 │   ├── environment.yml        # Conda env, exact build pins
 │   └── R_packages.csv         # All installed R packages and their versions
 ├── examples/
-│   └── run_bistro_local.sh    # Sample bash launcher (see below)
+│   ├── run_bistro_local.sh    # Sample bash launcher (see below)
+│   └── demo-dataset/          # Self-contained simulated demo (see below)
+│       ├── make_demo_dataset.py
+│       ├── make_demo_reference.R
+│       ├── demo.config
+│       ├── run_demo.sh
+│       └── ground_truth.json
+├── LICENSE
 ├── .gitignore
 └── README.md
 ```
@@ -133,21 +141,153 @@ Rscript -e '
 ```
 ---
 
+## Demo dataset
+
+A self-contained, fully simulated dataset lives in
+[`examples/demo-dataset/`](examples/demo-dataset/). It runs the entire pipeline
+on a single machine in minutes and needs no access to the manuscript data.
+
+```bash
+conda activate bistro
+bash examples/demo-dataset/run_demo.sh
+```
+
+That regenerates the inputs, builds the InSituType reference, and runs
+BISTRO end to end, leaving the report at
+`examples/demo-dataset/demo_output/BISTRO_report.html`. A verified run takes
+about 9 minutes on 4 cores and peaks at 2.8 GB.
+
+On an HPC cluster, submit it rather than running it on a login node:
+
+```bash
+sbatch examples/demo-dataset/run_demo_slurm.sbatch
+```
+
+The simulation is not arbitrary: it plants a **known ground truth** — a per-FOV
+library-size offset of known variance, a systematic decline in that offset
+across the acquisition order, a designated set of marker genes, and five cell
+types — and writes the realised values to `ground_truth.json`. A demo run can
+therefore be checked for correctness, not merely for completing.
+[`examples/demo-dataset/README.md`](examples/demo-dataset/README.md) lists what
+to compare against what.
+
+The demo doubles as the executable specification of the input schema described
+in the next section.
+
+---
+
 ## Input data
 
-For every dataset you need:
+BISTRO starts from data that has **already been quality-controlled**. The
+pipeline performs no cell or gene filtering of its own: whatever is in
+`tables['filtered']` is what gets benchmarked. Producing that archive from a
+vendor export is out of scope for this repository.
 
-1. **`filtered.zarr`** — A [SpatialData](https://spatialdata.scverse.org) zarr
-   archive with a quality-controlled `tables['filtered']` AnnData. Cells must
-   have spatial coordinates in micrometers (column convention:
-   `x_local_um`, `y_local_um`, `x_global_um`, `y_global_um`, `area_um2`).
-2. **scRNA-seq reference** — `.rds` or `.RData` Seurat/SCE object used by
-   InSituType for cell-type annotation.
-3. **Tissue annotation (optional)** — `.csv` (with a `tissue_annotations`,
-   `niche`, or `banksy_0.8` column) **or** `.geojson` (QuPath export). The
-   pipeline will perform point-in-polygon assignment.
-4. **H&E alignment matrix (optional)** — A 3×3 affine CSV (no
-   header) mapping H&E pixels to pixels.
+Every dataset needs three files (four with a GeoJSON annotation):
+
+| File | Required | Purpose |
+|---|---|---|
+| `filtered.zarr` | yes | QC'd expression + cell metadata (schema below) |
+| scRNA-seq reference | if `skip_annotation = false` | InSituType cell-type calling |
+| tissue annotation | yes | fixed effect in the batch-effect model |
+| H&E alignment matrix | only with a GeoJSON annotation | maps H&E pixels to image pixels |
+
+`examples/demo-dataset/make_demo_dataset.py` is a working, runnable
+implementation of everything below — when this document and that script
+disagree, the script is correct.
+
+### 1. `filtered.zarr` — schema
+
+A [SpatialData](https://spatialdata.scverse.org) zarr archive. Only the table
+is read; images, shapes and points are ignored (shape centroids are consulted
+only as a last-resort fallback for coordinates).
+
+**Structure**
+
+| Element | Required | Notes |
+|---|---|---|
+| `tables['filtered']` | **yes** | the AnnData that the whole pipeline operates on |
+| `tables['table']` | no | if present, re-indexed alongside `filtered` for MERSCOPE `EntityID` data |
+
+**`X` — the expression matrix**
+
+* **Raw integer counts**, cells × genes. Dense or `scipy.sparse`; both are handled.
+* **Must not be normalized or log-transformed.** Every method starts from these
+  counts, and TMM, scran and DESeq2 estimate size factors that are only
+  meaningful on raw counts.
+* Negative-control probes should already be **removed** from `X`; their
+  per-cell total is carried in `obs` instead (see `total_counts_Negative`).
+
+**`var` — genes**
+
+* `var_names` holds gene symbols and must be unique.
+* Symbols must overlap the scRNA-seq reference's row names, or annotation
+  produces no usable genes and the run stops.
+* The R stages normalize `-`, `_`, `:`, `/` and spaces to `.`
+  (`clean_gene_names()` in `bin/annotation/run_insitutype.R`, and the same
+  substitutions in `bin/plotters/hvg_upset_plot.py`). Symbols free of those
+  characters are safest.
+
+**`obs` — the index**
+
+Cell IDs, unique and stable. They are the join key between the expression
+matrix, the enriched metadata, the tissue annotation and every annotation
+output, so they must survive a CSV round-trip unchanged. If an `EntityID`
+column is present (the MERSCOPE convention) it is promoted to the index
+automatically.
+
+**`obs` — required columns**
+
+All coordinates are in **micrometers**; there is no unit conversion anywhere in
+the pipeline.
+
+| Column | Type | Used by |
+|---|---|---|
+| `x_local_um`, `y_local_um` | float | pseudo-FOV rasterization; SpaNorm coordinates on Xenium/MERSCOPE |
+| `x_global_um`, `y_global_um` | float | SpaNorm coordinates on CosMx; GeoJSON point-in-polygon; spatial plots |
+| `area_um2` | float | `areaNorm` size factors — this method has no toggle, so the column is always required |
+
+**`obs` — conditionally required**
+
+| Column | When | Notes |
+|---|---|---|
+| `total_counts_Negative` | `skip_annotation = false` | **Sum** of negative-probe counts per cell. `run_insitutype.R` divides it by 20 to get the per-cell background mean. |
+| `fov` | platforms with native FOVs (CosMx) | Integer FOV index. If absent, or constant, `assignFOV` rasterizes pseudo-FOVs from `x_local_um` / `y_local_um` using the technology's tile size. |
+| `fov_center_x_um`, `fov_center_y_um` | never supplied by hand | Computed by `assignFOV` when missing. |
+
+Any other columns are carried through to the metadata CSV untouched.
+
+> **FOV numbering is the acquisition order.** The drift analysis regresses the
+> per-FOV random intercepts against the FOV index, so for native-FOV platforms
+> `fov` should increase in the order the instrument imaged the tiles.
+> Rasterized platforms get a row-primary `fov` plus a column-primary `fov_perp`
+> so the two scan directions can be compared.
+
+### 2. scRNA-seq reference
+
+Two accepted forms, selected by file extension:
+
+| Extension | Expected contents |
+|---|---|
+| `.RData` | an object named exactly **`profile_matrix`** — genes × cell types, mean expression on the linear scale |
+| `.rds` | a Seurat object with a `CellType` column; profiles are built with `AggregateExpression` |
+
+### 3. Tissue annotation
+
+Required: the batch-effect model's fixed effect is
+`log_LS ~ C(tissue_annotations)`, so there is no path through
+`bin/evaluation/batch_effect.py` without it.
+
+| Format | Requirements |
+|---|---|
+| `.csv` | a `tissue_annotations` column (`niche` and `banksy_0.8` are accepted and renamed), keyed by a `cell_ID` column or by the unnamed index column, matching `obs` index values |
+| `.geojson` | a QuPath export whose `classification.name` gives the region label; assigned by point-in-polygon against `x_global_um` / `y_global_um` |
+
+### 4. H&E alignment matrix
+
+Only used with a GeoJSON annotation: a 3×3 affine as a headerless CSV, applied
+to the polygons before they are scaled from image pixels to micrometers by
+`pixelSize`.
 
 ---
 
@@ -292,5 +432,16 @@ The pipeline caches as:
 
 To rerun a single step from scratch, delete its sub-directory under the output
 folder.
+
+---
+
+## License
+
+Released under the MIT License — see [`LICENSE`](LICENSE).
+
+BISTRO orchestrates third-party normalization methods that carry their own
+licenses (among them edgeR, DESeq2, scran, SpaNorm, Seurat/SCTransform and
+InSituType). Each is invoked as a separate process rather than linked, but if
+you redistribute BISTRO together with those dependencies, check their terms.
 
 ---

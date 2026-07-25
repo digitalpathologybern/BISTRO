@@ -109,15 +109,15 @@ def compute_fov_centers_from_cells(meta, fov_column='fov'):
     fov_centers = (
         meta.groupby(fov_column, observed=True)
         .agg(fov_center_x_um=(x_col, 'mean'), fov_center_y_um=(y_col, 'mean'))
-        .reset_index()
     )
 
-    # Drop existing fov_center columns if present (to avoid merge conflicts)
+    # Assign by mapping on the FOV column rather than merging. A pandas merge
+    # discards the index, which would replace the cell IDs with a RangeIndex
+    # and break every downstream stage that aligns this metadata against
+    # adata.obs.index.
     for col in ['fov_center_x_um', 'fov_center_y_um']:
-        if col in meta.columns:
-            meta = meta.drop(columns=[col])
+        meta[col] = meta[fov_column].map(fov_centers[col])
 
-    meta = meta.merge(fov_centers, on=fov_column, how='left')
     return meta
 
 

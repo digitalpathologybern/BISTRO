@@ -1,0 +1,18 @@
+{
+    "_index": "_index",
+    "column-order": [
+        "fov",
+        "x_local_um",
+        "y_local_um",
+        "x_global_um",
+        "y_global_um",
+        "area_um2",
+        "total_counts_Negative",
+        "total_counts",
+        "n_genes_by_counts",
+        "true_cell_type",
+        "true_tissue_region"
+    ],
+    "encoding-type": "dataframe",
+    "encoding-version": "0.2.0"
+}

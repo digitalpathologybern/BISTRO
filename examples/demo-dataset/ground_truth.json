@@ -1,0 +1,208 @@
+{
+  "seed": 42,
+  "n_cells": 2000,
+  "n_genes": 200,
+  "n_fovs": 16,
+  "technology_profile": "CosMx (native FOVs, 510.72 um tiles)",
+  "nb_dispersion_theta": 10.0,
+  "batch_effect": {
+    "description": "Per-FOV offset u_f applied to log library size. The MELM random-intercept variance reported in *_batch_effect_summary.csv (var_random_intercept_reml) estimates var(u_f) for the 'none' normalization.",
+    "drift_slope_per_fov": -0.035,
+    "fov_noise_sd": 0.15,
+    "cell_noise_sd": 0.15,
+    "u_fov": [
+      0.222213,
+      0.358961,
+      0.110885,
+      -0.137314,
+      -0.072663,
+      0.088993,
+      -0.227013,
+      -0.027074,
+      -0.226314,
+      0.193491,
+      0.237271,
+      -0.28123,
+      -0.118986,
+      -0.336561,
+      -0.273897,
+      0.00802
+    ],
+    "realised_var_u_fov": 0.045796,
+    "realised_drift_slope": -0.023314,
+    "realised_drift_pearson_r": -0.5187,
+    "realised_fov_mean_log1p_library_size": [
+      6.24664,
+      6.384118,
+      6.164413,
+      5.929619,
+      5.967721,
+      6.109625,
+      5.811994,
+      6.01409,
+      5.828929,
+      6.220833,
+      6.282341,
+      5.803393,
+      5.9155,
+      5.721598,
+      5.827045,
+      6.045728
+    ]
+  },
+  "hvg": {
+    "description": "Marker genes carry the between-cell-type variance and are the genes HVG selection should preferentially recover.",
+    "n_marker_genes": 40,
+    "marker_log_fold_change": 1.6,
+    "markers_by_cell_type": {
+      "Epithelial": [
+        "KRT19",
+        "TRDC",
+        "JCHAIN",
+        "FLT3",
+        "COL1A2",
+        "LUM",
+        "ANGPT2",
+        "FASLG"
+      ],
+      "Tcell": [
+        "KRT14",
+        "IGHM",
+        "VWF",
+        "PLVAP",
+        "VEGFA",
+        "BCL2",
+        "AURKA",
+        "SPP1"
+      ],
+      "Bcell": [
+        "MUC2",
+        "GZMK",
+        "ITGAM",
+        "MYH11",
+        "CXCL12",
+        "IL6",
+        "IFNG",
+        "RB1"
+      ],
+      "Myeloid": [
+        "KRT18",
+        "AXIN2",
+        "KLRD1",
+        "KLRB1",
+        "COL4A1",
+        "STAT1",
+        "EGFR",
+        "CDKN2A"
+      ],
+      "Stromal": [
+        "TOP2A",
+        "CD2",
+        "PRDM1",
+        "CD14",
+        "S100A12",
+        "CLEC10A",
+        "ACTA2",
+        "PSMB9"
+      ]
+    },
+    "all_marker_genes": [
+      "ACTA2",
+      "ANGPT2",
+      "AURKA",
+      "AXIN2",
+      "BCL2",
+      "CD14",
+      "CD2",
+      "CDKN2A",
+      "CLEC10A",
+      "COL1A2",
+      "COL4A1",
+      "CXCL12",
+      "EGFR",
+      "FASLG",
+      "FLT3",
+      "GZMK",
+      "IFNG",
+      "IGHM",
+      "IL6",
+      "ITGAM",
+      "JCHAIN",
+      "KLRB1",
+      "KLRD1",
+      "KRT14",
+      "KRT18",
+      "KRT19",
+      "LUM",
+      "MUC2",
+      "MYH11",
+      "PLVAP",
+      "PRDM1",
+      "PSMB9",
+      "RB1",
+      "S100A12",
+      "SPP1",
+      "STAT1",
+      "TOP2A",
+      "TRDC",
+      "VEGFA",
+      "VWF"
+    ],
+    "tissue_effect_genes": [
+      "KRT5",
+      "CEACAM6",
+      "MKI67",
+      "HNF4A",
+      "CD3E",
+      "CCR7",
+      "TCF7",
+      "FOXP3",
+      "CD163",
+      "MSR1",
+      "NOTCH3",
+      "TEK",
+      "CXCL13",
+      "CCL2",
+      "CIITA",
+      "TAP2",
+      "MET",
+      "APC",
+      "TNFSF10",
+      "CDKN1A"
+    ]
+  },
+  "cell_types": {
+    "labels": [
+      "Epithelial",
+      "Tcell",
+      "Bcell",
+      "Myeloid",
+      "Stromal"
+    ],
+    "counts": {
+      "Epithelial": 523,
+      "Tcell": 409,
+      "Bcell": 184,
+      "Myeloid": 352,
+      "Stromal": 532
+    },
+    "note": "obs['true_cell_type'] holds the simulated label. Compare against annotation/1.0_HVG_none_annotation.csv; labels are recovered up to a permutation, so score with ARI."
+  },
+  "tissue_regions": {
+    "labels": [
+      "Tumor",
+      "Stroma",
+      "Immune"
+    ],
+    "counts": {
+      "Tumor": 669,
+      "Stroma": 671,
+      "Immune": 660
+    }
+  },
+  "library_size": {
+    "mean": 422.92,
+    "min": 202,
+    "max": 916
+  }
+}
