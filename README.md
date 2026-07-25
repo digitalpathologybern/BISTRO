@@ -79,9 +79,8 @@ All spatial coordinates are in **micrometers (µm)** throughout the pipeline.
 │   ├── data_loader.py         # SpatialData I/O, layers, FOV merging, tissue annotations
 │   └── helpers.py             # Stats helpers, FOV rasterization, layer-name parsing
 ├── envs/
-│   ├── environment.yml               # Curated, installable Python env
-│   ├── requirements-lock.txt         # Exact pins, verified end to end
-│   ├── environment_full_export.yml   # Full conda export, provenance only
+│   ├── requirements-lock.txt         # Exact pins, the install path
+│   ├── environment.yml               # Readable list of direct dependencies
 │   ├── install_R_packages.R          # R dependency installer and checker
 │   └── R_packages.csv                # All 371 R packages, provenance only
 ├── examples/
@@ -127,18 +126,15 @@ been tested on Linux.
 
 ### Python packages
 
-Installed from [`envs/environment.yml`](envs/environment.yml), a curated list
-of BISTRO's direct dependencies. For byte-exact reproduction,
-[`envs/requirements-lock.txt`](envs/requirements-lock.txt) additionally pins
-all 115 transitive packages, captured from an environment that was verified end
-to end. [`envs/environment_full_export.yml`](envs/environment_full_export.yml)
-is the full development environment, kept as a provenance record only — it is
-not installable (see the header of `environment.yml` for why).
+Installed from [`envs/requirements-lock.txt`](envs/requirements-lock.txt),
+which pins all 113 packages including transitive dependencies.
+[`envs/environment.yml`](envs/environment.yml) is a readable summary of the
+~20 packages BISTRO imports directly.
 
 | Package | Version | | Package | Version |
 |---|---|---|---|---|
 | numpy | 1.26.4 | | scanpy | 1.10.2 |
-| pandas | 2.2.3 | | statsmodels | 0.14.2 |
+| pandas | 2.0.0 | | statsmodels | 0.14.2 |
 | scipy | 1.13.1 | | scikit-learn | 1.5.0 |
 | anndata | 0.10.8 | | matplotlib | 3.9.0 |
 | spatialdata | 0.2.6 | | geopandas | 1.0.0 |
@@ -147,13 +143,17 @@ not installable (see the header of `environment.yml` for why).
 | xarray | 2024.11.0 | | leidenalg | 0.10.2 |
 | tqdm | 4.66.4 | | upsetplot | 0.9.0 |
 
-> **On pandas.** The development environment recorded pandas 2.0.0, but that
-> combination cannot be re-resolved: `spatialdata 0.2.6` requires
-> `xarray>=2024.10.0`, which requires `pandas>=2.1`. pip does not re-check
-> constraints after installation, so the original environment runs despite
-> violating them. The published environment pins **pandas 2.2.3**, the nearest
-> version satisfying the whole dependency graph. The pipeline was re-run on the
-> demo dataset with it and passes all 13 ground-truth checks.
+> **On pandas, and why the install needs `--no-deps`.** The environment that
+> produced the manuscript results holds pandas 2.0.0 together with
+> xarray 2024.11.0, and xarray 2024.11.0 declares `pandas>=2.1`. It runs
+> correctly, because the spatialdata code paths BISTRO exercises never touch
+> the pandas 2.1 API, but pip will not construct that combination: every
+> xarray at or above the `>=2024.10.0` floor spatialdata requires wants
+> pandas 2.1 or newer. Since pandas 2.0.0 is the version every published
+> result was computed on, it is held and pip's resolver is bypassed with
+> `--no-deps`. This is why `requirements-lock.txt` must list every transitive
+> dependency, and why it should be regenerated with `pip freeze` rather than
+> edited by hand.
 
 ### R packages
 
@@ -261,18 +261,17 @@ sudo apt-get install -y libglpk-dev libmagick++-dev libxml2-dev \
 ### 4. Python environment
 
 ```bash
-conda env create -n bistro -f envs/environment.yml
+conda create -n bistro -c conda-forge python=3.11.8 setuptools=69.1.0 numpy=1.26.4
 conda activate bistro
+pip install --no-deps -r envs/requirements-lock.txt
 ```
 
-Takes about 2 minutes. For byte-exact reproduction of the verified
-environment, install from the lock file instead:
-
-```bash
-conda create -n bistro python=3.11.8 setuptools=69.1.0 numpy=1.26.4
-conda activate bistro
-pip install -r envs/requirements-lock.txt
-```
+**`--no-deps` is required, not optional.** It bypasses pip's dependency
+resolver, which is the only way to reproduce the environment the manuscript
+results were computed on; see the note on pandas under
+[Python packages](#python-packages). Because `--no-deps` installs exactly the
+lines in the lock file and nothing else, that file lists all 113 packages
+including transitive ones.
 
 ### 5. R packages
 
@@ -306,11 +305,15 @@ On a normal desktop with a broadband connection:
 | Step | Time |
 |---|---|
 | Clone | seconds |
-| Nextflow + Java | 1–2 min |
-| System libraries | 1–3 min |
-| Conda environment | **~2 min** (measured: 1 m 37 s / 1 m 38 s) |
-| R packages | **1–3 hours** |
-| **Total** | **roughly 1.5–3.5 hours**, nearly all of it R |
+| Nextflow + Java | 1-2 min |
+| System libraries | 1-3 min |
+| Python environment (conda + pip) | **2 min 06 s**, measured |
+| R packages | **1-3 hours** |
+| **Total** | **roughly 1.5-3.5 hours**, nearly all of it R |
+
+The Python step is measured: 2 min 06 s on 4 cores, producing a 1.5 GB
+environment, verified by importing every module the pipeline uses, generating
+the demo dataset, and reading it back through the pipeline's own loader.
 
 The R step dominates and varies enormously with what CRAN and Bioconductor
 ship as binaries for your platform. On Linux, `BiocManager` builds most

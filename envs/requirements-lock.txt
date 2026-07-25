@@ -1,21 +1,33 @@
 # ============================================================================
 # BISTRO -- exact Python lock file
 # ----------------------------------------------------------------------------
-# `pip freeze` from an environment built from envs/environment.yml and VERIFIED
-# end to end: the full pipeline ran on the demo dataset from this environment
-# and passed all 13 ground-truth checks.
+# Every package version in the environment the manuscript results were computed
+# on, including transitive dependencies. This is the reproducible install path.
 #
-# environment.yml pins BISTRO's direct dependencies and lets pip resolve the
-# rest. That is readable and maintainable, but resolvers move: this file fixes
-# every transitive version as well, for exact reproduction.
-#
-#     conda create -n bistro python=3.11.8 setuptools=69.1.0 numpy=1.26.4
+#     conda create -n bistro -c conda-forge python=3.11.8 setuptools=69.1.0 numpy=1.26.4
 #     conda activate bistro
-#     pip install -r envs/requirements-lock.txt
+#     pip install --no-deps -r envs/requirements-lock.txt
 #
-# Note: numpy comes from conda (linked against conda-forge's OpenBLAS, as in
-# the manuscript environment), so install it with conda as shown above rather
-# than from this file.
+# `--no-deps` IS REQUIRED, and is the whole point of this file. The recorded
+# environment is not internally consistent: it holds pandas 2.0.0 alongside
+# xarray 2024.11.0, and xarray 2024.11.0 declares pandas>=2.1. It runs
+# correctly, because the spatialdata code paths BISTRO exercises never touch
+# the pandas 2.1 API, but pip's resolver refuses to construct it. Since pandas
+# 2.0.0 is the version every published result was produced on, it is held and
+# the resolver is bypassed instead. Dropping --no-deps makes pip re-resolve and
+# fail with a conflict naming pandas and spatialdata, mentioning neither xarray
+# nor the real cause.
+#
+# Because --no-deps installs exactly these lines and nothing else, this list
+# must stay complete. Regenerate it with `pip freeze` from a working
+# environment, never by hand.
+#
+# numpy and packaging come from conda, so they are installed in the conda
+# step above and are deliberately absent from this file. `pip freeze` in a
+# conda environment records conda-installed packages as local build paths
+# (`numpy @ file:///home/conda/feedstock_root/...`), which exist only on the
+# conda-forge build machine and make the file unusable anywhere else. When
+# regenerating this file, strip any line containing ' @ file://'.
 #
 # Verified on Rocky Linux 9.7, Python 3.11.8, x86_64.
 # ============================================================================
@@ -72,10 +84,8 @@ natsort==8.4.0
 networkx==3.1
 numba==0.61.0
 numcodecs==0.12.1
-numpy @ file:///home/conda/feedstock_root/build_artifacts/numpy_1707225376651/work/dist/numpy-1.26.4-cp311-cp311-linux_x86_64.whl#sha256=d08e1c9e5833ae7780563812aa73e2497db1ee3bd5510d3becb8aa18aa2d0c7c
 ome-zarr==0.9.0
-packaging @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_packaging_1777103621/work
-pandas==2.2.3
+pandas==2.0.0
 param==2.4.1
 partd==1.4.2
 patsy==1.0.2

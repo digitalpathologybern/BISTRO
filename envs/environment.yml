@@ -7,13 +7,10 @@
 #     conda env create -n bistro -f envs/environment.yml
 #     conda activate bistro
 #
-# This file is curated, not machine-generated. `environment_full_export.yml`
-# beside it is a `conda env export` of the full development environment and is
-# a PROVENANCE RECORD ONLY -- it is not installable. It pins a package that was
-# never on PyPI (stalign==1.0) and pins that contradict each other (pims==0.3.0
-# against dask-image, which needs pims>=0.4.1). Neither of those, nor most of
-# the other 370 packages in it, is used by BISTRO; they are debris from a
-# shared development environment.
+# This file is curated, not machine-generated. It documents the packages
+# BISTRO imports directly. It is NOT the install path: with pandas held at
+# 2.0.0 this set cannot be resolved by pip (see the note on pandas below), so
+# installation goes through requirements-lock.txt with --no-deps.
 #
 # The same split is used for R: install_R_packages.R installs the direct
 # dependencies, R_packages.csv records the full environment.
@@ -56,14 +53,12 @@ dependencies:
   - pip:
       # ---- Numerical core ---------------------------------------------------
       - numpy==1.26.4
-      # The manuscript environment records pandas 2.0.0, but that environment is
-      # internally inconsistent and cannot be re-resolved: spatialdata 0.2.6
-      # requires xarray>=2024.10.0, and every xarray from that release on
-      # requires pandas>=2.1. pip does not re-check constraints after install,
-      # so the original environment runs despite violating them. 2.2.3 is the
-      # nearest version that satisfies the whole graph; the demo's 13 ground-
-      # truth checks pass on it.
-      - pandas==2.2.3
+      # Held at the version every published result was computed on. This set
+      # is deliberately NOT pip-resolvable: spatialdata 0.2.6 requires
+      # xarray>=2024.10.0, and every such xarray requires pandas>=2.1. Install
+      # via requirements-lock.txt with --no-deps, which is what the recorded
+      # environment actually is.
+      - pandas==2.0.0
       - scipy==1.13.1
       - scikit-learn==1.5.0
       - statsmodels==0.14.2
