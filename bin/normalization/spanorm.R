@@ -156,8 +156,29 @@ if (separate_fovs == "1") {
     ############################################################################################################
     # 2. Process FOVs with per-FOV checkpointing
     pub_dir <- Sys.getenv("SPANORM_CHECKPOINT_DIR", output_csv_path)
-    ckpt_dir <- file.path(pub_dir, "spanorm_checkpoints")
+
+    # The checkpoint directory MUST be unique per adj.method. spaNormLog and
+    # spaNormPearson run concurrently and are handed the same
+    # SPANORM_CHECKPOINT_DIR by the workflow, so a shared directory caused two
+    # distinct failures:
+    #
+    #   1. Silent cross-contamination. Checkpoints were named fov_<N>.rds with
+    #      no reference to the method, and the loop skips any FOV whose file
+    #      already exists. Whichever process ran second loaded the other's
+    #      values and wrote them out under its own name, so a pearson layer
+    #      could contain logpac values with no error raised.
+    #
+    #   2. A crash. Each process calls unlink(ckpt_dir) when it finishes, which
+    #      deleted the directory out from under the process still running. The
+    #      survivor then died on its next saveRDS with
+    #      "gzfile: cannot open the connection".
+    #
+    # Keying the directory by transformation removes both at once: the two
+    # processes no longer share any path.
+    ckpt_dir <- file.path(pub_dir, paste0("spanorm_checkpoints_", transformation))
     dir.create(ckpt_dir, showWarnings = FALSE, recursive = TRUE)
+    cat(sprintf("Checkpoint directory: %s\n", ckpt_dir))
+    flush.console()
 
     logcounts_list <- list()
 
@@ -207,9 +228,11 @@ if (separate_fovs == "1") {
         rm(current_counts, normalized_logcounts); gc()
     }
 
-    # Clean up checkpoint dir after all FOVs complete
+    # Clean up this method's checkpoint dir after all FOVs complete. Only this
+    # method's directory is touched, never a sibling's.
     unlink(ckpt_dir, recursive = TRUE)
-    cat("All FOVs complete, checkpoints cleaned up\n")
+    cat(sprintf("All FOVs complete, checkpoints cleaned up (%s)\n",
+                basename(ckpt_dir)))
     flush.console()
 
 
