@@ -620,9 +620,13 @@ def run_batch_effect_pipeline(
     else:
         load_fov_from_metadata(sd_obj, nextflow_output)
 
+    os.makedirs(output_dir, exist_ok=True)
     load_tissue_annotations(sd_obj, tissue_annotation_path,
                             he_alignment_path=he_alignment_path,
-                            pixel_size_um=pixel_size)
+                            pixel_size_um=pixel_size,
+                            polygon_out_path=os.path.join(
+                                output_dir,
+                                f"{dataset_name}_tissue_polygons.geojson"))
 
     # ---- Discover normalization layers ----
     norm_map = discover_norm_layers(nextflow_output)
@@ -657,8 +661,26 @@ def run_batch_effect_pipeline(
             overview_cols = [xc, yc]
             break
     if overview_cols and 'tissue_annotations' in adata.obs.columns:
-        cell_overview = adata.obs[overview_cols + ['tissue_annotations']].copy()
-        cell_overview.columns = ['x', 'y', 'tissue']
+        # Carry fov and library size alongside the coordinates: the report's
+        # diagnostics use them to show FOV assignment and acquisition drift,
+        # and to zoom on a single FOV to check that annotation labels form
+        # contiguous patches rather than noise.
+        extra = [c for c in ['fov'] if c in adata.obs.columns]
+        cell_overview = adata.obs[overview_cols + ['tissue_annotations']
+                                  + extra].copy()
+        cell_overview.columns = ['x', 'y', 'tissue'] + extra
+
+        ls_col = next((c for c in ['nCount_RNA', 'total_counts']
+                       if c in adata.obs.columns), None)
+        if ls_col:
+            cell_overview['library_size'] = adata.obs[ls_col].values
+        else:
+            try:
+                X = adata.X
+                cell_overview['library_size'] = (
+                    np.asarray(X.sum(axis=1)).ravel())
+            except Exception:
+                pass
         if len(cell_overview) > 50000:
             cell_overview = cell_overview.sample(n=50000, random_state=42)
         overview_path = os.path.join(output_dir, f"{dataset_name}_cell_overview.csv")

@@ -69,7 +69,7 @@ def plot_cell_overview(overview_df):
     if 'tissue' not in overview_df.columns:
         return None
 
-    overview_df = overview_df.dropna(subset=['tissue'])
+    overview_df = overview_df.dropna(subset=['tissue']).copy()
     overview_df['tissue'] = overview_df['tissue'].astype(str)
 
     # Remove unannotated cells
@@ -78,14 +78,24 @@ def plot_cell_overview(overview_df):
         return None
 
     tissues = sorted(overview_df['tissue'].unique())
-    cmap = plt.colormaps['tab20']
-    color_map = {t: cmap(i % 20) for i, t in enumerate(tissues)}
+    # tab10 for 10 or fewer categories, tab20 only beyond that. tab20 is built
+    # as ten dark/light PAIRS, so using it for a handful of categories hands
+    # every second one a washed-out tint; at low alpha those regions render as
+    # blank white and the tissue looks absent from the slide.
+    if len(tissues) <= 10:
+        cmap, n_colors = plt.colormaps['tab10'], 10
+    else:
+        cmap, n_colors = plt.colormaps['tab20'], 20
+    color_map = {t: cmap(i % n_colors) for i, t in enumerate(tissues)}
 
     fig, ax = plt.subplots(figsize=(8, 7))
 
+    # s=0.3 with alpha=0.5 is close to invisible once a slide is subsampled to
+    # 50k cells spread over centimetres of tissue, which is the usual case for
+    # a TMA where each core holds only a few hundred plotted cells.
     for tissue in tissues:
         sub = overview_df[overview_df['tissue'] == tissue]
-        ax.scatter(sub['x'], sub['y'], s=0.3, alpha=0.5,
+        ax.scatter(sub['x'], sub['y'], s=1.5, alpha=0.85, linewidths=0,
                    color=color_map[tissue], label=tissue, rasterized=True)
 
     ax.set_aspect('equal')
@@ -95,10 +105,279 @@ def plot_cell_overview(overview_df):
     # Legend outside plot
     handles, labels = ax.get_legend_handles_labels()
     ax.legend(handles, labels, loc='center left', bbox_to_anchor=(1.02, 0.5),
-              fontsize=7, markerscale=10, frameon=False)
+              fontsize=7, markerscale=8, frameon=False)
 
     plt.tight_layout()
     return fig
+
+
+# ============================================================================
+# Section 0b: Pipeline diagnostics
+# ----------------------------------------------------------------------------
+# These panels exist to make specific, previously-silent failures visible.
+# Each one is aimed at a failure mode that reached production undetected:
+#
+#   * annotation coverage        a coordinate-space or merge-key mismatch
+#                                leaves cells unannotated while the pipeline
+#                                still completes and reports numbers
+#   * annotation coherence       a merge key that matches the WRONG cells
+#                                produces full coverage but scrambled labels,
+#                                which coverage alone cannot detect
+#   * polygon overlay            polygons in the wrong units sit off to one
+#                                side of the cells instead of on top of them
+#   * FOV map                    verifies FOV assignment, native or rasterized
+#   * per-FOV library size       shows acquisition drift directly
+# ============================================================================
+
+def _annotation_coherence(df, k=15, max_cells=20000, seed=0):
+    """
+    Mean fraction of each cell's k nearest spatial neighbours that share its
+    tissue label.
+
+    Real tissue regions are contiguous, so correctly merged annotations score
+    high (typically > 0.8). Labels attached to the wrong cells look like noise
+    and collapse towards the chance level, which is roughly the sum of squared
+    category frequencies. This is the only diagnostic here that distinguishes
+    "annotated correctly" from "annotated, but with another cell's label".
+    """
+    try:
+        from scipy.spatial import cKDTree
+    except Exception:
+        return None, None
+
+    sub = df.dropna(subset=['tissue', 'x', 'y'])
+    sub = sub[sub['tissue'].astype(str) != 'None']
+    if len(sub) < k + 1:
+        return None, None
+    if len(sub) > max_cells:
+        sub = sub.sample(n=max_cells, random_state=seed)
+
+    coords = sub[['x', 'y']].to_numpy()
+    labels = sub['tissue'].astype(str).to_numpy()
+    tree = cKDTree(coords)
+    # k+1 because the first neighbour returned is the cell itself
+    _, idx = tree.query(coords, k=min(k + 1, len(sub)))
+    if idx.ndim == 1:
+        return None, None
+    neigh = labels[idx[:, 1:]]
+    observed = float((neigh == labels[:, None]).mean())
+
+    freq = pd.Series(labels).value_counts(normalize=True).to_numpy()
+    chance = float((freq ** 2).sum())
+    return observed, chance
+
+
+def _diag_flag(ok, warn=False):
+    if warn:
+        return '<span style="color:#b26a00;font-weight:600">WARN</span>'
+    return ('<span style="color:#1a7f37;font-weight:600">PASS</span>' if ok
+            else '<span style="color:#b42318;font-weight:600">FAIL</span>')
+
+
+def build_diagnostics_table(df, polygons=None):
+    """HTML table of input-integrity checks with pass/warn/fail flags."""
+    rows = []
+    n = len(df)
+
+    # ---- coordinates -------------------------------------------------------
+    xr = (df['x'].min(), df['x'].max())
+    yr = (df['y'].min(), df['y'].max())
+    span_x, span_y = xr[1] - xr[0], yr[1] - yr[0]
+    rows.append(("Cells plotted", f"{n:,}", _diag_flag(n > 0)))
+    rows.append(("Coordinate range (um)",
+                 f"x [{xr[0]:,.0f}, {xr[1]:,.0f}], y [{yr[0]:,.0f}, {yr[1]:,.0f}]",
+                 _diag_flag(span_x > 0 and span_y > 0)))
+
+    # ---- annotation coverage ----------------------------------------------
+    if 'tissue' in df.columns:
+        t = df['tissue'].astype(str)
+        annotated = int(((~df['tissue'].isna()) & (t != 'None')).sum())
+        pct = 100.0 * annotated / max(1, n)
+        rows.append(("Cells with a tissue annotation",
+                     f"{annotated:,} of {n:,} ({pct:.1f}%)",
+                     _diag_flag(pct >= 50, warn=(1 <= pct < 50))))
+        ncat = df.loc[(~df['tissue'].isna()) & (t != 'None'), 'tissue'].nunique()
+        rows.append(("Distinct tissue categories", f"{ncat}",
+                     _diag_flag(ncat > 0)))
+
+        obs, chance = _annotation_coherence(df)
+        if obs is not None:
+            rows.append((
+                "Annotation spatial coherence",
+                f"{obs:.3f} (chance {chance:.3f}) over 15 nearest neighbours",
+                _diag_flag(obs >= 0.7, warn=(chance + 0.05 < obs < 0.7))))
+
+    # ---- FOVs --------------------------------------------------------------
+    if 'fov' in df.columns and df['fov'].notna().any():
+        nf = df['fov'].nunique()
+        per = df.groupby('fov').size()
+        rows.append(("Fields of view", f"{nf:,}", _diag_flag(nf > 0)))
+        rows.append(("Cells per FOV (plotted subsample)",
+                     f"min {per.min():,}, median {int(per.median()):,}, max {per.max():,}",
+                     _diag_flag(per.min() > 0)))
+
+    # ---- polygons ----------------------------------------------------------
+    if polygons is not None and len(polygons):
+        pb = polygons.total_bounds
+        inside = None
+        try:
+            from shapely.geometry import Point
+            from shapely.strtree import STRtree
+            geoms = list(polygons.geometry)
+            tree = STRtree(geoms)
+            samp = df.sample(n=min(5000, len(df)), random_state=0)
+            hit = 0
+            for x, y in zip(samp['x'], samp['y']):
+                p = Point(x, y)
+                if any(geoms[i].contains(p) for i in tree.query(p)):
+                    hit += 1
+            inside = 100.0 * hit / len(samp)
+        except Exception:
+            pass
+        rows.append(("Annotation polygon bounds (um)",
+                     f"x [{pb[0]:,.0f}, {pb[2]:,.0f}], y [{pb[1]:,.0f}, {pb[3]:,.0f}]",
+                     _diag_flag(True)))
+        if inside is not None:
+            rows.append(("Sampled cells falling inside a polygon",
+                         f"{inside:.1f}%",
+                         _diag_flag(inside >= 50, warn=(1 <= inside < 50))))
+
+    body = "\n".join(
+        f"<tr><td style='padding:4px 12px'>{k}</td>"
+        f"<td style='padding:4px 12px'><code>{v}</code></td>"
+        f"<td style='padding:4px 12px'>{f}</td></tr>"
+        for k, v, f in rows)
+    return (
+        "<table style='border-collapse:collapse;font-size:13px;margin:8px 0'>"
+        "<tr><th style='text-align:left;padding:4px 12px'>Check</th>"
+        "<th style='text-align:left;padding:4px 12px'>Value</th>"
+        "<th style='text-align:left;padding:4px 12px'>Status</th></tr>"
+        f"{body}</table>")
+
+
+def plot_diagnostics(df, polygons=None):
+    """
+    Four-panel diagnostic figure.
+
+    A  cells coloured by tissue with annotation polygon outlines overlaid
+    B  zoom on the densest FOV, one marker per cell
+    C  cells coloured by FOV identifier
+    D  per-FOV mean library size in space
+    """
+    have_fov = 'fov' in df.columns and df['fov'].notna().any()
+    have_ls = 'library_size' in df.columns and df['library_size'].notna().any()
+
+    fig, axes = plt.subplots(2, 2, figsize=(13, 11))
+    axA, axB, axC, axD = axes.ravel()
+
+    ann = df.dropna(subset=['tissue']).copy()
+    ann['tissue'] = ann['tissue'].astype(str)
+    ann = ann[ann['tissue'] != 'None']
+    tissues = sorted(ann['tissue'].unique())
+    cmap = plt.colormaps['tab10' if len(tissues) <= 10 else 'tab20']
+    ncol = 10 if len(tissues) <= 10 else 20
+    tcol = {t: cmap(i % ncol) for i, t in enumerate(tissues)}
+
+    # ---- A: annotation with polygon overlay --------------------------------
+    axA.scatter(df['x'], df['y'], s=0.8, c='#d9d9d9', linewidths=0,
+                label='unannotated', rasterized=True)
+    for t in tissues:
+        s = ann[ann['tissue'] == t]
+        axA.scatter(s['x'], s['y'], s=0.8, color=tcol[t], linewidths=0,
+                    label=t, rasterized=True)
+    if polygons is not None and len(polygons):
+        try:
+            polygons.boundary.plot(ax=axA, color='black', linewidth=0.6)
+            axA.set_title('A. Tissue annotation with polygon outlines\n'
+                          '(outlines must sit on the cells, not beside them)',
+                          fontsize=10)
+        except Exception:
+            axA.set_title('A. Tissue annotation', fontsize=10)
+    else:
+        axA.set_title('A. Tissue annotation (grey = unannotated)', fontsize=10)
+    axA.set_aspect('equal'); axA.axis('off')
+    axA.legend(loc='center left', bbox_to_anchor=(1.0, 0.5), fontsize=6,
+               markerscale=8, frameon=False)
+
+    # ---- B: zoom on the busiest FOV ----------------------------------------
+    if have_fov and len(ann):
+        # Prefer the FOV carrying the most distinct labels, since a boundary
+        # between regions is where scrambling is most obvious. On a TMA every
+        # core holds a single tissue, so fall back to a window spanning several
+        # cores rather than showing one uniform patch.
+        div = ann.groupby('fov')['tissue'].nunique()
+        if div.max() > 1:
+            pick = div.idxmax()
+            z = ann[ann['fov'] == pick]
+            where = f'FOV {pick}, {div.max()} labels'
+        else:
+            cx, cy = ann['x'].median(), ann['y'].median()
+            w = 0.25 * max(ann['x'].max() - ann['x'].min(),
+                           ann['y'].max() - ann['y'].min())
+            z = ann[(ann['x'].between(cx - w, cx + w))
+                    & (ann['y'].between(cy - w, cy + w))]
+            where = (f'central {2 * w:,.0f} um window, '
+                     f'{z["tissue"].nunique()} labels '
+                     f'(every FOV is single-tissue here)')
+        for t in sorted(z['tissue'].unique()):
+            s = z[z['tissue'] == t]
+            axB.scatter(s['x'], s['y'], s=10, color=tcol[t], linewidths=0,
+                        alpha=0.9, label=t)
+        axB.set_title(f'B. Zoom, {where}\nlabels should form patches; '
+                      f'salt-and-pepper means they are on the wrong cells',
+                      fontsize=10)
+        axB.legend(fontsize=6, frameon=False, markerscale=1.5)
+    else:
+        axB.text(0.5, 0.5, 'no FOV column available', ha='center',
+                 va='center', transform=axB.transAxes, fontsize=9, color='grey')
+        axB.set_title('B. Zoom unavailable', fontsize=10)
+    axB.set_aspect('equal'); axB.axis('off')
+
+    # ---- C: FOV identity ---------------------------------------------------
+    if have_fov:
+        codes = pd.Categorical(df['fov']).codes
+        axC.scatter(df['x'], df['y'], s=0.8, c=codes, cmap='nipy_spectral',
+                    linewidths=0, rasterized=True)
+        cen = df.groupby('fov')[['x', 'y']].mean()
+        axC.scatter(cen['x'], cen['y'], s=6, c='black', marker='+')
+        axC.set_title(f'C. FOV assignment ({df["fov"].nunique()} FOVs, '
+                      f'crosses = centres)', fontsize=10)
+    else:
+        axC.text(0.5, 0.5, 'no FOV column available', ha='center', va='center',
+                 transform=axC.transAxes, fontsize=9, color='grey')
+        axC.set_title('C. FOV assignment unavailable', fontsize=10)
+    axC.set_aspect('equal'); axC.axis('off')
+
+    # ---- D: per-FOV mean library size --------------------------------------
+    if have_fov and have_ls:
+        g = df.groupby('fov').agg(x=('x', 'mean'), y=('y', 'mean'),
+                                  ls=('library_size', 'mean'))
+        sc = axD.scatter(g['x'], g['y'], c=g['ls'], s=60, cmap='viridis',
+                         edgecolors='none')
+        fig.colorbar(sc, ax=axD, fraction=0.046, label='mean library size')
+        axD.set_title('D. Mean library size per FOV\n'
+                      '(a smooth gradient indicates acquisition drift)',
+                      fontsize=10)
+    else:
+        axD.text(0.5, 0.5, 'library size or FOV unavailable', ha='center',
+                 va='center', transform=axD.transAxes, fontsize=9, color='grey')
+        axD.set_title('D. Library size map unavailable', fontsize=10)
+    axD.set_aspect('equal'); axD.axis('off')
+
+    plt.tight_layout()
+    return fig
+
+
+def load_annotation_polygons(results_dir):
+    """Load transformed (micrometre-space) annotation polygons, if written."""
+    path = find_file(results_dir, "*tissue_polygons*.geojson")
+    if not path:
+        return None
+    try:
+        import geopandas as gpd
+        return gpd.read_file(path)
+    except Exception:
+        return None
 
 
 # ============================================================================
@@ -794,6 +1073,31 @@ def generate_html_report(results_dir, dataset_name, output_html):
             sections.append(
                 f'<h2>Spatial Overview</h2>\n'
                 f'<img src="data:image/png;base64,{b64}" />\n'
+            )
+
+    # ==== Section 0b: Pipeline diagnostics ====
+    if cell_overview_file:
+        try:
+            diag_df = pd.read_csv(cell_overview_file)
+            polygons = load_annotation_polygons(results_dir)
+            table = build_diagnostics_table(diag_df, polygons)
+            dfig = plot_diagnostics(diag_df, polygons)
+            db64 = fig_to_base64(dfig)
+            sections.append(
+                f'<h2>Pipeline diagnostics</h2>\n'
+                f'<p style="font-size:13px;color:#444">Input-integrity checks. '
+                f'These verify that tissue annotations were merged onto the '
+                f'correct cells and in the correct coordinate space, and that '
+                f'FOV assignment succeeded, before any downstream number is '
+                f'interpreted.</p>\n'
+                f'{table}\n'
+                f'<img src="data:image/png;base64,{db64}" />\n'
+            )
+        except Exception as exc:
+            sections.append(
+                f'<h2>Pipeline diagnostics</h2>\n'
+                f'<p style="color:#b42318">Diagnostics could not be generated: '
+                f'{type(exc).__name__}: {exc}</p>\n'
             )
 
     # ==== Section 1: Batch Effect ====

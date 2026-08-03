@@ -347,7 +347,7 @@ def assign_fov(sd_obj, technology, scale=1):
 # ============================================================================
 
 def load_tissue_annotations(sd_obj, annotation_path, he_alignment_path=None,
-                            pixel_size_um=0.2125):
+                            pixel_size_um=0.2125, polygon_out_path=None):
     """
     Load tissue region annotations from a CSV or GeoJSON file and merge
     them into the SpatialData obs table.
@@ -390,15 +390,46 @@ def load_tissue_annotations(sd_obj, annotation_path, he_alignment_path=None,
             anno_df = anno_df[['Unnamed: 0', 'tissue_annotations']]
             anno_df['tissue_annotations'] = anno_df['tissue_annotations'].astype(str)
 
-        # Build merge key
+        # Build merge key.
+        #
+        # Some annotation exports order the two components of the cell ID the
+        # other way round (fov_cell vs cell_fov), so both orderings are tried.
+        # The choice is made by which ordering matches MORE cells, not by
+        # testing a single row: the first row of the annotation file is often
+        # a cell that quality control removed, in which case a first-row test
+        # concludes the format differs and silently swaps every key. That
+        # produces a merge that is both sparse and WRONG, because a swapped
+        # key can still collide with a different, real cell and attach that
+        # cell's annotation to it.
         if 'cell_ID' in anno_df.columns:
             obs_index = set(sd_obj.tables['filtered'].obs.index.astype(str))
-            if anno_df['cell_ID'].astype(str).iloc[0] in obs_index:
-                anno_df['merge_key'] = anno_df['cell_ID'].astype(str)
+
+            def _swap(value):
+                parts = str(value).split('_')
+                if len(parts) < 2:
+                    return str(value)
+                return f"{parts[-1]}_{parts[-2]}"
+
+            direct = anno_df['cell_ID'].astype(str)
+            swapped = direct.apply(_swap)
+            n_direct = int(direct.isin(obs_index).sum())
+            n_swapped = int(swapped.isin(obs_index).sum())
+
+            if n_direct >= n_swapped:
+                anno_df['merge_key'] = direct
+                chosen, n_match = 'cell_ID as given', n_direct
             else:
-                anno_df['merge_key'] = anno_df['cell_ID'].apply(
-                    lambda x: f"{x.split('_')[-1]}_{x.split('_')[-2]}"
-                )
+                anno_df['merge_key'] = swapped
+                chosen, n_match = 'cell_ID components swapped', n_swapped
+
+            n_cells = len(obs_index)
+            print(f"  annotation merge key: {chosen} "
+                  f"({n_match:,} of {n_cells:,} cells matched; "
+                  f"direct {n_direct:,}, swapped {n_swapped:,})")
+            if n_match < 0.5 * n_cells:
+                print(f"  WARNING: only {100.0 * n_match / max(1, n_cells):.1f}% of "
+                      f"cells matched an annotation row under either ordering. "
+                      f"Check that the annotation file corresponds to this zarr.")
         elif 'Unnamed: 0' in anno_df.columns:
             anno_df['merge_key'] = anno_df['Unnamed: 0']
         else:
@@ -449,19 +480,37 @@ def load_tissue_annotations(sd_obj, annotation_path, he_alignment_path=None,
         anno_df = gpd.read_file(annotation_path)
         anno_df['category'] = anno_df["classification"].apply(_extract_name)
 
-        # Apply affine + scale to um. 10x Xenium alignment CSVs map H&E px
-        # to Xenium px, so after the affine we scale by pixel_size.
+        # QuPath exports polygons in IMAGE PIXELS, so they must always be
+        # scaled by pixel_size to reach the micrometre space the cell
+        # coordinates live in. When an alignment matrix is supplied it maps
+        # H&E pixels to image pixels and is applied first; the scaling to
+        # micrometres happens either way.
+        #
+        # Previously the scaling was applied ONLY when an affine was given.
+        # Without one the polygons stayed in pixels while cells were compared
+        # in micrometres, so nothing intersected and every cell silently
+        # received "None". On the CosMx WTx colorectal slides (pixel_size
+        # 0.12) that put the polygons 8.3x too large and annotated 0 cells.
+        geoms_series = anno_df["geometry"]
         if affine_params is not None:
-            anno_df["transformed_geometry"] = anno_df["geometry"].apply(
-                lambda g: shapely_scale(
-                    affine_transform(g, affine_params),
-                    xfact=pixel_size_um,
-                    yfact=pixel_size_um,
-                    origin=(0, 0),
-                )
-            )
-        else:
-            anno_df["transformed_geometry"] = anno_df["geometry"]
+            geoms_series = geoms_series.apply(
+                lambda g: affine_transform(g, affine_params))
+        anno_df["transformed_geometry"] = geoms_series.apply(
+            lambda g: shapely_scale(g, xfact=pixel_size_um,
+                                    yfact=pixel_size_um, origin=(0, 0))
+        )
+
+        # Export the transformed polygons so the report can overlay them on
+        # the cells. Polygons drawn beside the cells rather than on top of
+        # them is the visual signature of a coordinate-space mismatch.
+        if polygon_out_path:
+            try:
+                out = anno_df[["category", "transformed_geometry"]].copy()
+                out = out.set_geometry("transformed_geometry")
+                out.to_file(polygon_out_path, driver="GeoJSON")
+                print(f"  wrote annotation polygons (um) to {polygon_out_path}")
+            except Exception as exc:
+                print(f"  could not write polygons: {type(exc).__name__}: {exc}")
 
         # Build spatial index
         geoms = list(anno_df["transformed_geometry"])
@@ -486,7 +535,31 @@ def load_tissue_annotations(sd_obj, annotation_path, he_alignment_path=None,
 
         sd_obj.tables["filtered"].obs["tissue_annotations"] = cell_labels
         n_annotated = sum(1 for l in cell_labels if l != "None")
-        print(f"Tissue annotations loaded (GeoJSON): {n_annotated} cells annotated")
+        pct = 100.0 * n_annotated / max(1, len(cell_labels))
+        print(f"Tissue annotations loaded (GeoJSON): {n_annotated} cells "
+              f"annotated ({pct:.1f}%)")
+
+        # A near-total miss almost always means a coordinate-space mismatch
+        # between the polygons and the cell centroids, not genuinely
+        # unannotated tissue. Left unchecked it silently reduces the
+        # batch-effect model's tissue term to a single level, so tissue
+        # variation is absorbed by the FOV random intercept instead.
+        if pct < 1.0:
+            poly_bounds = anno_df["transformed_geometry"].total_bounds \
+                if hasattr(anno_df["transformed_geometry"], "total_bounds") \
+                else gpd.GeoSeries(anno_df["transformed_geometry"]).total_bounds
+            raise ValueError(
+                f"Only {n_annotated} of {len(cell_labels)} cells ({pct:.2f}%) fell "
+                f"inside a tissue polygon. This indicates a coordinate-space "
+                f"mismatch, not sparse annotation.\n"
+                f"  polygon bounds after transform: {poly_bounds}\n"
+                f"  cell bounds (um): x [{x_coords.min():.0f}, {x_coords.max():.0f}], "
+                f"y [{y_coords.min():.0f}, {y_coords.max():.0f}]\n"
+                f"  pixelSize used: {pixel_size_um}\n"
+                f"Check that params.pixelSize matches the image the GeoJSON was "
+                f"drawn on, and that heAlignmentPath is set if the polygons come "
+                f"from a separate H&E image."
+            )
 
     else:
         print(f"Warning: unrecognized annotation format '{ext}'. Use .csv or .geojson.")
