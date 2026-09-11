@@ -633,6 +633,8 @@ process batch_effect_evaluation {
             --checkpoint_dir "${params.output_folder_path}/$outputDir/checkpoints" \\
             $he_arg \\
             $vc_arg \\
+            --n_jobs ${task.cpus} \\
+            --ci_scheme cluster \\
             --use_log
     fi
     """
@@ -817,7 +819,7 @@ process generate_report {
 // ============================================================================
 // WORKFLOW
 // ============================================================================
-params.restore_published = params.restore_published ?: true
+params.restore_published = params.containsKey('restore_published') ? params.restore_published : true
 
 // Optional: an external reference annotation for the HVG benchmark. Declared
 // here so configs that omit it do not trigger Nextflow's "access to undefined

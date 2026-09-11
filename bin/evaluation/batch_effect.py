@@ -78,6 +78,8 @@ def evaluate_batch_effect_single_layer(
     tissue_column='tissue_annotations',
     fov_column='fov',
     use_log=True,
+    n_jobs=None,
+    ci_scheme="cluster",
     n_boot_ci=200,
     vc_column=None,
 ):
@@ -158,11 +160,25 @@ def evaluate_batch_effect_single_layer(
     adata.obs['library_size'] = library_sizes
     adata.obs['log_LS'] = np.log1p(library_sizes)
 
-    n_nan = np.isnan(adata.obs['log_LS']).sum()
-    if n_nan > 0 and use_log:
-        print(f"  WARNING: log1p produced {n_nan} NaN values "
-            f"(layer has negative library sizes). "
-            f"Falling back to untransformed library size.")
+    n_nan = int(np.isnan(adata.obs['log_LS']).sum())
+    n_neg = int((library_sizes < 0).sum())
+
+    # Is the row sum of this layer a LIBRARY SIZE at all? For scale-factor
+    # normalisations it is: a non-negative per-cell total. For residual-based
+    # methods (scTransform, SpaNorm-pearson) the values are signed residuals,
+    # so their row sum is a sum of standardised deviations with expectation
+    # near zero. It is not a total of anything, it cannot be logged, and
+    # exp(u) - 1 on the resulting intercepts is meaningless. Those layers are
+    # fitted for completeness but their library-size statistics are reported
+    # as UNDEFINED rather than as numbers.
+    response_is_library_size = (n_nan == 0 and n_neg == 0)
+
+    if not response_is_library_size and use_log:
+        print(f"  NOTE: layer '{layer_name}' has {n_neg} cells with a negative "
+              f"row sum and {n_nan} non-finite log values. Its row sum is a "
+              f"residual total, not a library size; falling back to the "
+              f"untransformed response and marking the library-size drift and "
+              f"relative-bias statistics undefined for this layer.")
         use_log = False
 
     # Prepare modelling dataframe with required columns
@@ -225,7 +241,8 @@ def evaluate_batch_effect_single_layer(
     print(f"  MELM ML (1|FOV):  AIC = {aic_melm:.1f}, BIC = {bic_melm:.1f}")
 
     # ---- LRT p-value: OLS vs MELM-ML (Equation 3) ----
-    p_value = lrt_pvalue(model_ols, model_melm_ml)
+    n_vc_added = 1 + (1 if (vc_column and vc_column in df.columns) else 0)
+    p_value = lrt_pvalue(model_ols, model_melm_ml, n_vc=n_vc_added)
     print(f"  LRT p-value (OLS vs MELM-ML): {p_value:.4e}")
 
     # ---- Extract random intercepts from REML fit (Equation 4) ----
@@ -234,7 +251,12 @@ def evaluate_batch_effect_single_layer(
     re_df = pd.DataFrame(model_melm_reml.random_effects).T.reset_index()
     re_df = re_df.rename(columns={'index': 'fov', 'Group': 'random_intercept'})
     re_df['fov'] = re_df['fov'].str.replace('FOV', '').astype(int)
-    re_df['relative_bias'] = np.exp(re_df['random_intercept']) - 1
+    # exp(u) - 1 is a fractional deviation ONLY if u is a log-scale offset.
+    # On the linear-scale fallback it exponentiates a count and overflows.
+    if use_log and response_is_library_size:
+        re_df['relative_bias'] = np.exp(re_df['random_intercept']) - 1
+    else:
+        re_df['relative_bias'] = np.nan
     re_df['layer'] = layer_name
     re_df['dataset'] = dataset_name
 
@@ -254,24 +276,47 @@ def evaluate_batch_effect_single_layer(
     # ---- Bootstrap CI for tau-squared (replaces chi-squared, Equation 5) ----
     print(f"  Computing bootstrap CI for tau^2 ({n_boot_ci} iterations)...")
     var_ci = bootstrap_var_ci(
-        df, formula, fov_col, n_boot=n_boot_ci, alpha=0.05, seed=42
+        df, formula, fov_col, n_boot=n_boot_ci, alpha=0.05, seed=42,
+        n_jobs=n_jobs, scheme=ci_scheme, vc_formula=vc_formula
     )
     print(f"  Bootstrap CI = [{var_ci[0]:.6f}, {var_ci[1]:.6f}]")
 
     # ---- Drift regression: REML intercepts vs FOV acquisition index ----
+    # Regress the RANDOM INTERCEPT u, not exp(u) - 1. u is the estimated FOV
+    # offset on whatever scale the model was fitted, is always finite, and does
+    # not overflow. Two x axes are reported because they are not the same thing
+    # on a platform that drops FOVs: 'rank' is the position in the sorted FOV
+    # sequence, 'id' is the FOV identifier itself, which is what the TMA power
+    # analysis simulates against.
+    from scipy.stats import linregress
+
     re_sorted = re_df.sort_values('fov')
-    fov_index = np.arange(len(re_sorted))
-    intercepts = re_sorted['relative_bias'].values
+    intercepts = re_sorted['random_intercept'].to_numpy(dtype=float)
+    axis_rank = np.arange(len(re_sorted), dtype=float)
+    axis_id = re_sorted['fov'].to_numpy(dtype=float)
 
-    if len(fov_index) > 2 and np.std(intercepts) > 0:
-        drift_r, drift_p = pearsonr(fov_index, intercepts)
-        from sklearn.linear_model import LinearRegression
-        lr = LinearRegression().fit(fov_index.reshape(-1, 1), intercepts)
-        drift_slope = lr.coef_[0]
-    else:
-        drift_r, drift_p, drift_slope = np.nan, np.nan, np.nan
+    finite = np.isfinite(intercepts)
+    n_nonfinite = int((~finite).sum())
+    if n_nonfinite:
+        print(f"  WARNING: {n_nonfinite} non-finite random intercepts excluded "
+              f"from the drift regression")
 
-    print(f"  Drift: Pearson r = {drift_r:.4f}, p = {drift_p:.4e}, slope = {drift_slope:.6f}")
+    def _drift(x):
+        m = finite & np.isfinite(x)
+        if m.sum() <= 2 or np.std(intercepts[m]) == 0 or np.std(x[m]) == 0:
+            return (np.nan,) * 4
+        res = linregress(x[m], intercepts[m])
+        return res.rvalue, res.pvalue, res.slope, res.stderr
+
+    drift_r, drift_p, drift_slope, drift_se = _drift(axis_rank)
+    drift_r_id, drift_p_id, drift_slope_id, drift_se_id = _drift(axis_id)
+
+    if not response_is_library_size:
+        print(f"  Drift on '{layer_name}': computed on the residual response; "
+              f"NOT a library-size drift and reported as undefined.")
+
+    print(f"  Drift (rank axis): r = {drift_r:.4f}, p = {drift_p:.4e}, "
+          f"slope = {drift_slope:.6g} +/- {drift_se:.3g}")
 
     return {
         'layer': layer_name,
@@ -295,7 +340,7 @@ def evaluate_batch_effect_single_layer(
         'var_mixedlm_reml': var_hat_reml,
         'var_ci_lower': var_ci[0],
         'var_ci_upper': var_ci[1],
-        'ci_method': 'bootstrap',
+        'ci_method': f'bootstrap_{ci_scheme}',
         'n_boot_ci': n_boot_ci,
         'vc_column': vc_column if vc_column else '',
         'var_vc_reml': var_vc_reml,
@@ -305,6 +350,30 @@ def evaluate_batch_effect_single_layer(
         'drift_pearson_r': drift_r,
         'drift_pearson_p': drift_p,
         'drift_slope': drift_slope,
+        'drift_slope_se': drift_se,
+        'drift_axis': 'rank',
+        'drift_pearson_r_fovid': drift_r_id,
+        'drift_pearson_p_fovid': drift_p_id,
+        'drift_slope_fovid': drift_slope_id,
+        'drift_slope_se_fovid': drift_se_id,
+        'n_nonfinite_intercepts': n_nonfinite,
+        # Interpretability flags. See the response classification above.
+        'response_is_library_size': response_is_library_size,
+        'response_scale': 'log1p' if use_log else 'linear',
+        'response_sd': float(np.nanstd(df[y_col].to_numpy(dtype=float))),
+        # Degenerate means the response has no variance to model, which happens
+        # by construction whenever the normalisation forces every cell to the
+        # same library size (CPM, CP10K, CP100 always; scran only above the
+        # 50,000-cell threshold where scran_norm.R extrapolates size factors
+        # proportional to library size). The test must be RELATIVE: those
+        # layers carry floating-point residue around 5e-7 in absolute terms,
+        # which an absolute threshold misses, while their coefficient of
+        # variation is around 1e-7 against 1e-2 for a genuine response.
+        'response_degenerate': bool(
+            np.nanstd(df[y_col].to_numpy(dtype=float))
+            / max(abs(float(np.nanmean(df[y_col].to_numpy(dtype=float)))), 1e-12)
+            < 1e-6),
+        'lrt_reference': f'0.5*chi2_{n_vc_added}+0.5*chi2_{n_vc_added-1}',
     }
 
 
@@ -541,6 +610,7 @@ def compute_drift_comparison(sd_obj, dataset_name, technology,
 def run_batch_effect_pipeline(
     zarr_path, nextflow_output, technology, tissue_annotation_path,
     output_dir, dataset_name=None, use_log=True, metadata_csv=None,
+    n_jobs=None, ci_scheme="cluster",
     he_alignment_path=None, pixel_size=0.2125, n_boot_ci=200,
     vc_column=None, checkpoint_dir=None,
 ):
@@ -764,7 +834,7 @@ def run_batch_effect_pipeline(
             result = evaluate_batch_effect_single_layer(
                 sd_obj, layer_name, dataset_name, technology,
                 use_log=use_log, n_boot_ci=n_boot_ci,
-                vc_column=vc_column,
+                vc_column=vc_column, n_jobs=n_jobs, ci_scheme=ci_scheme,
             )
 
             re_layer = result['random_effects_mixedlm_model_random_intercept']
@@ -789,6 +859,18 @@ def run_batch_effect_pipeline(
                 'drift_pearson_r': result['drift_pearson_r'],
                 'drift_pearson_p': result['drift_pearson_p'],
                 'drift_slope': result['drift_slope'],
+                'drift_slope_se': result.get('drift_slope_se', np.nan),
+                'drift_axis': result.get('drift_axis', 'rank'),
+                'drift_pearson_r_fovid': result.get('drift_pearson_r_fovid', np.nan),
+                'drift_pearson_p_fovid': result.get('drift_pearson_p_fovid', np.nan),
+                'drift_slope_fovid': result.get('drift_slope_fovid', np.nan),
+                'drift_slope_se_fovid': result.get('drift_slope_se_fovid', np.nan),
+                'n_nonfinite_intercepts': result.get('n_nonfinite_intercepts', 0),
+                'response_is_library_size': result.get('response_is_library_size', True),
+                'response_scale': result.get('response_scale', 'log1p'),
+                'response_sd': result.get('response_sd', np.nan),
+                'response_degenerate': result.get('response_degenerate', False),
+                'lrt_reference': result.get('lrt_reference', ''),
                 'vc_column': result.get('vc_column', ''),
                 'var_vc_reml': result.get('var_vc_reml', np.nan),
             }
@@ -878,6 +960,14 @@ def build_parser():
     p.add_argument("--n_boot_ci", type=int, default=200,
                    help="Number of bootstrap iterations for tau-squared CI "
                         "(default 200)")
+    p.add_argument("--n_jobs", type=int, default=None,
+                   help="Parallel workers for the bootstrap. Pass task.cpus; "
+                        "the default oversubscribes under SLURM.")
+    p.add_argument("--ci_scheme", choices=["cluster", "within"], default="cluster",
+                   help="Bootstrap resampling unit for the tau^2 interval. "
+                        "'cluster' resamples FOVs (variance-component interval, "
+                        "the default); 'within' resamples cells inside a fixed "
+                        "FOV set (conditional interval, much narrower).")
     p.add_argument("--use_log", action="store_true", default=True,
                    help="Log-transform library sizes before modelling")
     p.add_argument("--vc_column", default=None,
@@ -911,6 +1001,8 @@ def main():
         n_boot_ci=args.n_boot_ci,
         vc_column=args.vc_column,
         checkpoint_dir=args.checkpoint_dir,
+        n_jobs=args.n_jobs,
+        ci_scheme=args.ci_scheme,
     )
 
 

@@ -159,7 +159,8 @@ def assign_fov(metadata_path, technology, output_dir):
             meta = compute_fov_centers_from_cells(meta)
 
         fov_info = {
-            'fov_source': 'native',
+            'fov_source': ('rasterized_inherited'
+                       if 'fov_perp' in meta.columns else 'native'),
             'technology': technology,
             'n_fovs': n_fovs,
             'message': f'Native FOV identifiers detected ({n_fovs} FOVs). '

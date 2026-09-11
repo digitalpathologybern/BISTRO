@@ -187,11 +187,28 @@ if (separate_fovs == "1") {
         ckpt_file <- file.path(ckpt_dir, paste0("fov_", fov, ".rds"))
 
         # Skip if checkpoint exists
+        # A checkpoint that EXISTS is not necessarily a checkpoint that READS.
+        # A task killed mid-saveRDS (preemption on job_cpu_preemptable is routine)
+        # leaves a truncated .rds behind, and trusting it purely because the file
+        # is present fails the whole run with
+        #   Error in readRDS(ckpt_file) : error reading from connection
+        # which is what killed cosmx-crc-18k-11 and -12 on 2026-09-10. Validate by
+        # reading, and refit the FOV if the read fails.
+        ckpt_ok <- FALSE
         if (file.exists(ckpt_file)) {
-            cat(sprintf("[%d/%d] FOV %s: loading from checkpoint\n",
-                        i, length(fov_list), fov))
-            flush.console()
-            logcounts_list[[as.character(fov)]] <- readRDS(ckpt_file)
+            restored <- tryCatch(readRDS(ckpt_file), error = function(e) NULL)
+            if (is.null(restored)) {
+                cat(sprintf("  [%d/%d] FOV %s: checkpoint unreadable, refitting\n",
+                            i, length(fov_list), fov))
+                unlink(ckpt_file)
+            } else {
+                cat(sprintf("  [%d/%d] FOV %s: loading from checkpoint\n",
+                            i, length(fov_list), fov))
+                logcounts_list[[as.character(fov)]] <- restored
+                ckpt_ok <- TRUE
+            }
+        }
+        if (ckpt_ok) {
             next
         }
 
