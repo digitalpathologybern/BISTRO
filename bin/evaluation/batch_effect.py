@@ -163,14 +163,7 @@ def evaluate_batch_effect_single_layer(
     n_nan = int(np.isnan(adata.obs['log_LS']).sum())
     n_neg = int((library_sizes < 0).sum())
 
-    # Is the row sum of this layer a LIBRARY SIZE at all? For scale-factor
-    # normalisations it is: a non-negative per-cell total. For residual-based
-    # methods (scTransform, SpaNorm-pearson) the values are signed residuals,
-    # so their row sum is a sum of standardised deviations with expectation
-    # near zero. It is not a total of anything, it cannot be logged, and
-    # exp(u) - 1 on the resulting intercepts is meaningless. Those layers are
-    # fitted for completeness but their library-size statistics are reported
-    # as UNDEFINED rather than as numbers.
+    # True only when the row sum is a non-negative per-cell total.
     response_is_library_size = (n_nan == 0 and n_neg == 0)
 
     if not response_is_library_size and use_log:
@@ -251,8 +244,6 @@ def evaluate_batch_effect_single_layer(
     re_df = pd.DataFrame(model_melm_reml.random_effects).T.reset_index()
     re_df = re_df.rename(columns={'index': 'fov', 'Group': 'random_intercept'})
     re_df['fov'] = re_df['fov'].str.replace('FOV', '').astype(int)
-    # exp(u) - 1 is a fractional deviation ONLY if u is a log-scale offset.
-    # On the linear-scale fallback it exponentiates a count and overflows.
     if use_log and response_is_library_size:
         re_df['relative_bias'] = np.exp(re_df['random_intercept']) - 1
     else:
@@ -282,16 +273,17 @@ def evaluate_batch_effect_single_layer(
     print(f"  Bootstrap CI = [{var_ci[0]:.6f}, {var_ci[1]:.6f}]")
 
     # ---- Drift regression: REML intercepts vs FOV acquisition index ----
-    # Regress the RANDOM INTERCEPT u, not exp(u) - 1. u is the estimated FOV
-    # offset on whatever scale the model was fitted, is always finite, and does
-    # not overflow. Two x axes are reported because they are not the same thing
-    # on a platform that drops FOVs: 'rank' is the position in the sorted FOV
-    # sequence, 'id' is the FOV identifier itself, which is what the TMA power
-    # analysis simulates against.
+    # Drift response: exp(u) - 1 for library-size layers, u otherwise.
+    # Both the rank and the FOV-identifier axis are reported.
     from scipy.stats import linregress
 
     re_sorted = re_df.sort_values('fov')
-    intercepts = re_sorted['random_intercept'].to_numpy(dtype=float)
+    if use_log and response_is_library_size:
+        intercepts = re_sorted['relative_bias'].to_numpy(dtype=float)
+        drift_response = 'relative_bias'
+    else:
+        intercepts = re_sorted['random_intercept'].to_numpy(dtype=float)
+        drift_response = 'random_intercept'
     axis_rank = np.arange(len(re_sorted), dtype=float)
     axis_id = re_sorted['fov'].to_numpy(dtype=float)
 
@@ -315,8 +307,8 @@ def evaluate_batch_effect_single_layer(
         print(f"  Drift on '{layer_name}': computed on the residual response; "
               f"NOT a library-size drift and reported as undefined.")
 
-    print(f"  Drift (rank axis): r = {drift_r:.4f}, p = {drift_p:.4e}, "
-          f"slope = {drift_slope:.6g} +/- {drift_se:.3g}")
+    print(f"  Drift (rank axis, on {drift_response}): r = {drift_r:.4f}, "
+          f"p = {drift_p:.4e}, slope = {drift_slope:.6g} +/- {drift_se:.3g}")
 
     return {
         'layer': layer_name,
@@ -352,6 +344,7 @@ def evaluate_batch_effect_single_layer(
         'drift_slope': drift_slope,
         'drift_slope_se': drift_se,
         'drift_axis': 'rank',
+        'drift_response': drift_response,
         'drift_pearson_r_fovid': drift_r_id,
         'drift_pearson_p_fovid': drift_p_id,
         'drift_slope_fovid': drift_slope_id,
@@ -361,14 +354,7 @@ def evaluate_batch_effect_single_layer(
         'response_is_library_size': response_is_library_size,
         'response_scale': 'log1p' if use_log else 'linear',
         'response_sd': float(np.nanstd(df[y_col].to_numpy(dtype=float))),
-        # Degenerate means the response has no variance to model, which happens
-        # by construction whenever the normalisation forces every cell to the
-        # same library size (CPM, CP10K, CP100 always; scran only above the
-        # 50,000-cell threshold where scran_norm.R extrapolates size factors
-        # proportional to library size). The test must be RELATIVE: those
-        # layers carry floating-point residue around 5e-7 in absolute terms,
-        # which an absolute threshold misses, while their coefficient of
-        # variation is around 1e-7 against 1e-2 for a genuine response.
+        # Relative test: the response has no variance to model.
         'response_degenerate': bool(
             np.nanstd(df[y_col].to_numpy(dtype=float))
             / max(abs(float(np.nanmean(df[y_col].to_numpy(dtype=float)))), 1e-12)
@@ -861,6 +847,7 @@ def run_batch_effect_pipeline(
                 'drift_slope': result['drift_slope'],
                 'drift_slope_se': result.get('drift_slope_se', np.nan),
                 'drift_axis': result.get('drift_axis', 'rank'),
+                'drift_response': result.get('drift_response', 'relative_bias'),
                 'drift_pearson_r_fovid': result.get('drift_pearson_r_fovid', np.nan),
                 'drift_pearson_p_fovid': result.get('drift_pearson_p_fovid', np.nan),
                 'drift_slope_fovid': result.get('drift_slope_fovid', np.nan),

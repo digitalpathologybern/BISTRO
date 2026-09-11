@@ -66,6 +66,8 @@ process assignFOV {
         python ${projectDir}/bin/preprocessing/assign_fov.py \\
             --metadata $metadataCSV \\
             --technology $technology \\
+            ${params.fovMap ? "--fov_map '${params.fovMap}' \\" : ''}
+            ${params.fovTileUm ? "--fov_tile_um '${params.fovTileUm}' \\" : ''}
             --output_dir $outputDir
     fi
     """
@@ -820,6 +822,10 @@ process generate_report {
 // WORKFLOW
 // ============================================================================
 params.restore_published = params.containsKey('restore_published') ? params.restore_published : true
+// Optional per-cell native FOV map; empty means rasterise.
+params.fovMap = params.containsKey('fovMap') ? params.fovMap : ''
+// Optional rasterisation pitch, 'width,height' in um.
+params.fovTileUm = params.containsKey('fovTileUm') ? params.fovTileUm : ''
 
 // Optional: an external reference annotation for the HVG benchmark. Declared
 // here so configs that omit it do not trigger Nextflow's "access to undefined

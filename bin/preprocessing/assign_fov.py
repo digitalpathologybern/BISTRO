@@ -121,7 +121,8 @@ def compute_fov_centers_from_cells(meta, fov_column='fov'):
     return meta
 
 
-def assign_fov(metadata_path, technology, output_dir):
+def assign_fov(metadata_path, technology, output_dir, fov_map_path=None,
+               fov_tile_um=None):
     """
     Main FOV assignment logic.
 
@@ -148,7 +149,44 @@ def assign_fov(metadata_path, technology, output_dir):
     print(f"  Cells: {len(meta)}")
     print(f"  Columns: {list(meta.columns)}")
 
-    if check_fov_exists(meta):
+    if fov_map_path:
+        # ---- Vendor-native FOV from a per-cell map, highest precedence ----
+        fmap = pd.read_csv(fov_map_path, index_col=0)
+        if 'fov' not in fmap.columns:
+            raise ValueError(f"{fov_map_path} has no 'fov' column")
+        matched = meta.index.intersection(fmap.index)
+        cover = len(matched) / max(len(meta), 1)
+        print(f"  FOV map: {fov_map_path}")
+        print(f"  Matched {len(matched)} of {len(meta)} cells ({100 * cover:.2f}%)")
+        if cover < 0.5:
+            raise ValueError(
+                f"FOV map matches only {100 * cover:.2f}% of cells. The cell ids "
+                f"do not line up; check that the map was built from the same "
+                f"vendor bundle as this zarr.")
+        meta['fov'] = fmap['fov'].reindex(meta.index)
+        if 'fov_name' in fmap.columns:
+            meta['fov_name'] = fmap['fov_name'].reindex(meta.index)
+        unmatched = int(meta['fov'].isna().sum())
+        if unmatched:
+            print(f"  WARNING: {unmatched} cells absent from the map; "
+                  f"they carry no FOV and will be dropped downstream")
+        meta = compute_fov_centers_from_cells(meta)
+        n_fovs = int(meta['fov'].nunique())
+        fov_info = {
+            'fov_source': 'vendor_native',
+            'technology': technology,
+            'n_fovs': n_fovs,
+            'fov_map': str(fov_map_path),
+            'cells_matched': int(len(matched)),
+            'cells_unmatched': unmatched,
+            'has_perpendicular': False,
+            'message': (f'Vendor-native FOV identities taken from {fov_map_path} '
+                        f'({n_fovs} tiles). The integer order is the ASSUMED '
+                        f'row-major scan, the same assumption the rasteriser '
+                        f'makes; no acquisition timestamp exists.')
+        }
+
+    elif check_fov_exists(meta):
         # ---- Native FOV (e.g. CosMx) ----
         n_fovs = int(meta['fov'].nunique())
         print(f"  Native FOV identifiers found: {n_fovs} FOVs")
@@ -169,7 +207,7 @@ def assign_fov(metadata_path, technology, output_dir):
 
     else:
         # ---- Rasterization needed (Xenium, MERSCOPE) ----
-        fov_size = get_fov_size(technology)
+        fov_size = get_fov_size(technology, tile_um=fov_tile_um)
         print(f"  No valid FOV identifiers found. Rasterizing pseudo-FOVs...")
         print(f"  Technology: {technology}, tile size: {fov_size} um")
 
@@ -233,6 +271,13 @@ def build_parser():
     p.add_argument("--technology", required=True,
                    choices=["CosMx", "Xenium", "MERSCOPE"],
                    help="iST platform")
+    p.add_argument("--fov_tile_um", default=None,
+                   help="Rasterisation pitch as 'width,height' in um, "
+                        "overriding the per-technology default.")
+    p.add_argument("--fov_map", default=None,
+                   help="Per-cell native FOV map CSV (cell_id, fov, fov_name) "
+                        "from bin/preprocessing/make_fov_map.py. Takes "
+                        "precedence over the obs fov column and rasterisation.")
     p.add_argument("--output_dir", required=True,
                    help="Directory to write enriched metadata and fov_info.json")
     return p
@@ -245,6 +290,9 @@ def main():
         metadata_path=args.metadata,
         technology=args.technology,
         output_dir=args.output_dir,
+        fov_map_path=args.fov_map,
+        fov_tile_um=([float(v) for v in args.fov_tile_um.split(',')]
+                     if args.fov_tile_um else None),
     )
 
 

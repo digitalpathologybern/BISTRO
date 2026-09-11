@@ -105,22 +105,9 @@ def _bootstrap_refit_worker(args):
     """
     One bootstrap iteration for the random-intercept variance.
 
-    Two resampling schemes are supported and they answer different questions.
-
-    scheme='cluster' (default): FOVs are resampled with replacement, carrying
-        all of their cells. This is the interval for tau-squared as a variance
-        component, i.e. it includes the uncertainty about WHICH FOV offsets were
-        drawn. It is the interval that matches a cross-slide claim of the form
-        "the FOV effect on this slide is larger than on that one". Each drawn
-        FOV is relabelled with a fresh synthetic group id, because statsmodels
-        keys groups by label and would otherwise merge a duplicated FOV into a
-        single larger group, biasing tau-squared downward.
-
-    scheme='within': cells are resampled with replacement inside each FOV, with
-        the FOV set held fixed. This is a CONDITIONAL interval: it describes how
-        precisely tau-squared is pinned down given these particular FOVs, and it
-        carries no uncertainty about which offsets were drawn. It is much
-        narrower and it will not cover a population value.
+    scheme='cluster' resamples FOVs with replacement, relabelling each draw with
+    a fresh synthetic group id. scheme='within' resamples cells inside a fixed
+    FOV set.
 
     Parameters
     ----------
@@ -138,7 +125,6 @@ def _bootstrap_refit_worker(args):
     rng = np.random.default_rng(seed + boot_idx)
 
     if scheme == "cluster":
-        # Resample FOVs with replacement, relabelling each draw uniquely.
         groups = list(df.groupby(group_col).indices.items())
         picks = rng.choice(len(groups), size=len(groups), replace=True)
         parts = []
@@ -149,7 +135,6 @@ def _bootstrap_refit_worker(args):
         df_boot = pd.concat(parts, ignore_index=True)
         fit_groups = df_boot["_boot_group"]
     else:
-        # Resample cells within each FOV, FOV set fixed.
         parts = []
         for _, group_df in df.groupby(group_col):
             n = len(group_df)
@@ -175,16 +160,8 @@ def bootstrap_var_ci(df, formula, group_col, n_boot=200, alpha=0.05,
     Parametric bootstrap confidence interval for the random intercept
     variance (tau-squared) from a mixed-effects linear model.
 
-    scheme='cluster' (default) resamples FOVs with replacement, which is the
-    interval for tau-squared as a variance component and is what a cross-slide
-    comparison needs. scheme='within' resamples cells inside a fixed FOV set,
-    which is a conditional interval and is much narrower. See
-    _bootstrap_refit_worker for the full statement of the difference.
-
-    vc_formula, when given, is carried into every refit so the bootstrap fits
-    the same model as the point estimate. Omitting it on a model that has an
-    extra variance component makes the FOV term absorb that component and
-    produces an interval that need not contain its own point estimate.
+    scheme selects the resampling unit. vc_formula, when given, is carried into
+    every refit.
 
     This replaces the chi-squared approximation (var_ci_chisq) which has
     poor coverage for small group counts.
@@ -205,8 +182,7 @@ def bootstrap_var_ci(df, formula, group_col, n_boot=200, alpha=0.05,
     seed : int
         Random seed for reproducibility.
     n_jobs : int or None
-        Number of parallel workers. If None, uses min(n_boot, cpu_count), which
-        oversubscribes under a SLURM allocation; pass task.cpus instead.
+        Number of parallel workers. Pass task.cpus under SLURM.
     scheme : {'cluster', 'within'}
         Resampling unit. 'cluster' resamples FOVs, 'within' resamples cells.
     vc_formula : dict or None
@@ -256,12 +232,9 @@ def lrt_pvalue(model_restricted, model_full, n_vc=1, boundary=True):
     Implements Equation 3 from the BISTRO manuscript:
         Lambda = 2 * (loglik_full - loglik_restricted)
 
-    Testing whether a variance component is zero puts the null ON THE BOUNDARY
-    of the parameter space, so the statistic is not chi-squared with n_vc
-    degrees of freedom. The correct asymptotic reference is the 50:50 mixture
+    Referenced to the boundary-corrected mixture
         0.5 * chi2_{n_vc} + 0.5 * chi2_{n_vc - 1}
-    (Self and Liang 1987; Stram and Lee 1994). For a single component this is
-    exactly half the naive p-value, so the naive test is conservative.
+    (Self and Liang 1987; Stram and Lee 1994).
 
     Parameters
     ----------
@@ -270,9 +243,7 @@ def lrt_pvalue(model_restricted, model_full, n_vc=1, boundary=True):
     model_full : statsmodels results object
         The full model (e.g., MELM with FOV random intercept).
     n_vc : int
-        Number of variance components the full model adds over the restricted
-        one. 1 for the single-slide model, 2 for the TMA model which adds a
-        patient component.
+        Number of variance components the full model adds over the restricted one.
     boundary : bool
         Use the boundary-corrected mixture reference. Set False to reproduce
         the naive chi2_1 test.
@@ -286,7 +257,6 @@ def lrt_pvalue(model_restricted, model_full, n_vc=1, boundary=True):
     lr_stat = max(lr_stat, 0.0)
     if not boundary:
         return chi2.sf(lr_stat, n_vc)
-    # 0.5 * chi2_{n_vc} + 0.5 * chi2_{n_vc-1}; chi2_0 is a point mass at zero
     upper = chi2.sf(lr_stat, n_vc)
     lower = chi2.sf(lr_stat, n_vc - 1) if n_vc > 1 else 0.0
     return 0.5 * (upper + lower)
@@ -300,12 +270,18 @@ def lrt_pvalue(model_restricted, model_full, n_vc=1, boundary=True):
 # coordinate schema where all spatial columns are in um.
 # ============================================================================
 
-def get_fov_size(technology, scale=1):
+# Xenium rasterisation pitch in um. Override per dataset with params.fovTileUm.
+XENIUM_TILE_UM = [600.0, 720.0]
+XENIUM_TILE_UM_PROTOTYPE = [600.0, 875.0]
+
+
+def get_fov_size(technology, scale=1, tile_um=None):
     """
     Return the FOV tile dimensions [width_um, height_um] for a given
     iST technology, used for pseudo-FOV rasterization.
 
     All values are in **micrometers**.
+
 
     Parameters
     ----------
@@ -313,14 +289,19 @@ def get_fov_size(technology, scale=1):
         One of 'CosMx', 'Xenium', 'MERSCOPE'.
     scale : float
         Scaling factor applied to the FOV dimensions (default 1).
+    tile_um : sequence of two floats, optional
+        Explicit [width_um, height_um] pitch, overriding the default.
 
     Returns
     -------
     list
         [width_um, height_um].
     """
+    if tile_um is not None:
+        w, h = float(tile_um[0]), float(tile_um[1])
+        return [w / scale, h / scale]
     if technology == 'Xenium':
-        return [600 / scale, 720 / scale]
+        return [XENIUM_TILE_UM[0] / scale, XENIUM_TILE_UM[1] / scale]
     elif technology == 'CosMx':
         return [510.72, 510.72]
     elif technology == 'MERSCOPE':
