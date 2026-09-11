@@ -38,7 +38,8 @@ import pandas as pd
 
 # Add utils to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', 'utils'))
-from helpers import rasterize_fov_grid, get_fov_size
+from helpers import (rasterize_fov_grid, get_fov_size,
+                     validate_coordinate_scale)
 
 
 def check_fov_exists(meta):
@@ -122,7 +123,7 @@ def compute_fov_centers_from_cells(meta, fov_column='fov'):
 
 
 def assign_fov(metadata_path, technology, output_dir, fov_map_path=None,
-               fov_tile_um=None):
+               fov_tile_um=None, check_coord_scale=True):
     """
     Main FOV assignment logic.
 
@@ -149,6 +150,14 @@ def assign_fov(metadata_path, technology, output_dir, fov_map_path=None,
     print(f"  Cells: {len(meta)}")
     print(f"  Columns: {list(meta.columns)}")
 
+    coord_check = validate_coordinate_scale(
+        meta, technology, raise_on_fail=check_coord_scale)
+    if coord_check.get('median_nn_um') is not None:
+        print(f"  Median nearest-neighbour distance: "
+              f"{coord_check['median_nn_um']:.2f} um "
+              f"({coord_check['coord_columns'][0]}/"
+              f"{coord_check['coord_columns'][1]})")
+
     if fov_map_path:
         # ---- Vendor-native FOV from a per-cell map, highest precedence ----
         fmap = pd.read_csv(fov_map_path, index_col=0)
@@ -158,28 +167,53 @@ def assign_fov(metadata_path, technology, output_dir, fov_map_path=None,
         cover = len(matched) / max(len(meta), 1)
         print(f"  FOV map: {fov_map_path}")
         print(f"  Matched {len(matched)} of {len(meta)} cells ({100 * cover:.2f}%)")
+
+        join_keys = pd.Index(meta.index.astype(str))
+        if cover < 0.5:
+            stripped = pd.Index(
+                meta.index.astype(str).str.replace(r'_\d+$', '', regex=True))
+            alt = stripped.intersection(fmap.index)
+            alt_cover = len(alt) / max(len(meta), 1)
+            print(f"  Retry without the region suffix: matched {len(alt)} "
+                  f"({100 * alt_cover:.2f}%)")
+            if alt_cover > cover:
+                join_keys = stripped
+                matched, cover = alt, alt_cover
         if cover < 0.5:
             raise ValueError(
                 f"FOV map matches only {100 * cover:.2f}% of cells. The cell ids "
                 f"do not line up; check that the map was built from the same "
                 f"vendor bundle as this zarr.")
-        meta['fov'] = fmap['fov'].reindex(meta.index)
+        meta['fov'] = fmap['fov'].reindex(join_keys).to_numpy()
         if 'fov_name' in fmap.columns:
-            meta['fov_name'] = fmap['fov_name'].reindex(meta.index)
+            meta['fov_name'] = fmap['fov_name'].reindex(join_keys).to_numpy()
         unmatched = int(meta['fov'].isna().sum())
         if unmatched:
             print(f"  WARNING: {unmatched} cells absent from the map; "
                   f"they carry no FOV and will be dropped downstream")
         meta = compute_fov_centers_from_cells(meta)
         n_fovs = int(meta['fov'].nunique())
+
+        has_perp = 'fov_perp' in fmap.columns
+        n_fovs_perp = None
+        if has_perp:
+            meta['fov_perp'] = fmap['fov_perp'].reindex(join_keys).to_numpy()
+            meta = compute_fov_centers_from_cells(meta, fov_column='fov_perp')
+            meta = meta.rename(columns={
+                'fov_center_x_um': 'fov_perp_center_x_um',
+                'fov_center_y_um': 'fov_perp_center_y_um'})
+            meta = compute_fov_centers_from_cells(meta, fov_column='fov')
+            n_fovs_perp = int(meta['fov_perp'].nunique())
+
         fov_info = {
             'fov_source': 'vendor_native',
             'technology': technology,
             'n_fovs': n_fovs,
+            'n_fovs_perp': n_fovs_perp,
             'fov_map': str(fov_map_path),
             'cells_matched': int(len(matched)),
             'cells_unmatched': unmatched,
-            'has_perpendicular': False,
+            'has_perpendicular': bool(has_perp),
             'message': (f'Vendor-native FOV identities taken from {fov_map_path} '
                         f'({n_fovs} tiles). The integer order is the ASSUMED '
                         f'row-major scan, the same assumption the rasteriser '
@@ -243,6 +277,9 @@ def assign_fov(metadata_path, technology, output_dir, fov_map_path=None,
           f"fov_center_x_um={'yes' if 'fov_center_x_um' in meta.columns else 'no'}, "
           f"fov_center_y_um={'yes' if 'fov_center_y_um' in meta.columns else 'no'}")
 
+    fov_info['median_nn_um'] = coord_check.get('median_nn_um')
+    fov_info['coord_scale_ok'] = coord_check.get('ok')
+
     # ---- Write FOV info JSON for the report ----
     os.makedirs(output_dir, exist_ok=True)
     info_path = os.path.join(output_dir, 'fov_info.json')
@@ -280,6 +317,10 @@ def build_parser():
                         "precedence over the obs fov column and rasterisation.")
     p.add_argument("--output_dir", required=True,
                    help="Directory to write enriched metadata and fov_info.json")
+    p.add_argument("--no_coord_check", action="store_true",
+                   help="Warn instead of failing when the coordinate scale "
+                        "check finds a median nearest-neighbour distance "
+                        "outside the plausible micrometer range.")
     return p
 
 
@@ -293,6 +334,7 @@ def main():
         fov_map_path=args.fov_map,
         fov_tile_um=([float(v) for v in args.fov_tile_um.split(',')]
                      if args.fov_tile_um else None),
+        check_coord_scale=not args.no_coord_check,
     )
 
 

@@ -319,6 +319,117 @@ def get_fov_size(technology, scale=1, tile_um=None):
 # output center columns use new naming convention.
 # ============================================================================
 
+COORD_NN_MIN_UM = 2.0
+COORD_NN_MAX_UM = 200.0
+COORD_NN_AREA_RATIO_MIN = 0.25
+
+
+def validate_coordinate_scale(meta, technology, raise_on_fail=True,
+                              sample_n=20000, seed=0):
+    """
+    Check that cell centroid coordinates are plausibly in micrometers.
+
+    The primary test compares the median nearest-neighbour distance between
+    centroids against the square root of the median cell area from the same
+    table. Both are lengths in micrometers, so their ratio is dimensionless
+    and independent of tissue density and platform, while a coordinate array
+    scaled by a wrong unit factor moves the numerator only.
+
+    When no area column is present the test falls back to an absolute range
+    on the nearest-neighbour distance.
+
+    Parameters
+    ----------
+    meta : pd.DataFrame
+        Cell metadata carrying a coordinate pair and, ideally, 'area_um2'.
+    technology : str
+        Platform name, used only in the message.
+    raise_on_fail : bool
+        Raise ValueError instead of warning.
+    sample_n : int
+        Number of cells sampled for the neighbour search.
+    seed : int
+        Seed for the subsample.
+
+    Returns
+    -------
+    dict
+        median_nn_um, median_area_um2, nn_area_ratio, n_sampled,
+        coord_columns, test, ok.
+    """
+    import numpy as np
+
+    blank = {'median_nn_um': None, 'median_area_um2': None,
+             'nn_area_ratio': None, 'n_sampled': 0,
+             'coord_columns': None, 'test': None, 'ok': None}
+
+    for xc, yc in (('x_global_um', 'y_global_um'),
+                   ('x_local_um', 'y_local_um'),
+                   ('x_centroid', 'y_centroid')):
+        if xc in meta.columns and yc in meta.columns:
+            break
+    else:
+        return blank
+
+    xy = meta[[xc, yc]].to_numpy(dtype=float)
+    keep = np.isfinite(xy).all(axis=1)
+    xy = xy[keep]
+    if len(xy) < 10:
+        return dict(blank, n_sampled=int(len(xy)), coord_columns=(xc, yc))
+
+    area = None
+    if 'area_um2' in meta.columns:
+        a = meta.loc[keep, 'area_um2'].to_numpy(dtype=float)
+    else:
+        a = None
+
+    if len(xy) > sample_n:
+        idx = np.random.default_rng(seed).choice(len(xy), sample_n,
+                                                 replace=False)
+        xy = xy[idx]
+        if a is not None:
+            a = a[idx]
+
+    if a is not None:
+        a = a[np.isfinite(a) & (a > 0)]
+        if len(a) >= 10:
+            area = float(np.median(a))
+
+    from scipy.spatial import cKDTree
+    d, _ = cKDTree(xy).query(xy, k=2)
+    median_nn = float(np.median(d[:, 1]))
+
+    if area:
+        ratio = median_nn / np.sqrt(area)
+        ok = ratio >= COORD_NN_AREA_RATIO_MIN
+        test = 'nn_over_sqrt_area'
+        detail = (f"median nearest-neighbour distance {median_nn:.2f} um "
+                  f"against sqrt(median cell area) {np.sqrt(area):.2f} um "
+                  f"gives a ratio of {ratio:.3f}, below the minimum "
+                  f"{COORD_NN_AREA_RATIO_MIN}")
+    else:
+        ratio = None
+        ok = COORD_NN_MIN_UM <= median_nn <= COORD_NN_MAX_UM
+        test = 'nn_absolute_range'
+        detail = (f"median nearest-neighbour distance {median_nn:.2f} um is "
+                  f"outside [{COORD_NN_MIN_UM}, {COORD_NN_MAX_UM}] um")
+
+    result = {'median_nn_um': median_nn, 'median_area_um2': area,
+              'nn_area_ratio': (float(ratio) if ratio is not None else None),
+              'n_sampled': int(len(xy)), 'coord_columns': (xc, yc),
+              'test': test, 'ok': bool(ok)}
+
+    if not ok:
+        msg = (f"Coordinate scale check failed for {technology} on "
+               f"{xc}/{yc}: {detail}. Coordinates are probably not in "
+               f"micrometers.")
+        if raise_on_fail:
+            raise ValueError(msg)
+        print(f"  WARNING: {msg}")
+
+    return result
+
+
 def rasterize_fov_grid(meta, tile_size_um, min_cells_per_fov=0,
                        scan_axis='row', fov_col='fov'):
     """

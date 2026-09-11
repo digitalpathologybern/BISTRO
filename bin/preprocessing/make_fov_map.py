@@ -87,12 +87,21 @@ def build_map(transcripts_path, verbose=True):
     ordered = sorted(origins, key=lambda f: (row_of[f], origins[f][0]))
     fov_id = {f: i + 1 for i, f in enumerate(ordered)}
 
+    # Column-major ordering over the same tiles, the perpendicular axis.
+    xs = sorted({round(o[0], 0) for o in origins.values()})
+    col_of = {}
+    for f, (ox, oy) in origins.items():
+        col_of[f] = min(range(len(xs)), key=lambda i: abs(xs[i] - ox))
+    ordered_perp = sorted(origins, key=lambda f: (col_of[f], origins[f][1]))
+    fov_perp_id = {f: i + 1 for i, f in enumerate(ordered_perp)}
+
     out = pd.DataFrame({
         "cell_id": list(best.keys()),
         "fov_name": [best[c] for c in best],
     })
     out["fov"] = out["fov_name"].map(fov_id).astype(int)
-    out = out[["cell_id", "fov", "fov_name"]].sort_values("fov")
+    out["fov_perp"] = out["fov_name"].map(fov_perp_id).astype(int)
+    out = out[["cell_id", "fov", "fov_perp", "fov_name"]].sort_values("fov")
 
     meta = {
         "source": os.path.abspath(transcripts_path),
@@ -102,8 +111,13 @@ def build_map(transcripts_path, verbose=True):
         "fraction_straddling": round(straddle / max(len(out), 1), 6),
         "ordering": ("row-major over measured tile origins; an assumed "
                      "acquisition order, no timestamp exists"),
+        "ordering_perp": ("column-major over the same tile origins, the "
+                          "perpendicular axis used for the sensitivity check"),
         "fov_name_to_fov": {k: int(v) for k, v in sorted(fov_id.items(),
                                                          key=lambda kv: kv[1])},
+        "fov_name_to_fov_perp": {k: int(v) for k, v in
+                                 sorted(fov_perp_id.items(),
+                                        key=lambda kv: kv[1])},
     }
     return out, meta
 
