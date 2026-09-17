@@ -52,6 +52,8 @@ process assignFOV {
     publishDir "${params.output_folder_path}", mode: 'copy'
 
     script:
+    def fovMapArg  = params.fovMap    ? "--fov_map '${params.fovMap}'"        : ''
+    def fovTileArg = params.fovTileUm ? "--fov_tile_um '${params.fovTileUm}'" : ''
     """
     mkdir -p $outputDir
     PUB="${params.output_folder_path}/$outputDir"
@@ -66,9 +68,7 @@ process assignFOV {
         python ${projectDir}/bin/preprocessing/assign_fov.py \\
             --metadata $metadataCSV \\
             --technology $technology \\
-            ${params.fovMap ? "--fov_map '${params.fovMap}' \\" : ''}
-            ${params.fovTileUm ? "--fov_tile_um '${params.fovTileUm}' \\" : ''}
-            --output_dir $outputDir
+            --output_dir $outputDir ${fovMapArg} ${fovTileArg}
     fi
     """
 }
