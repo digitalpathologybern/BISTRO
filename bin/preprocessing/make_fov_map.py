@@ -4,7 +4,9 @@ Build a per-cell native FOV map from a vendor transcripts table.
 
 Xenium reports its tile identity per transcript as `fov_name` (analysis software
 1.4 onward), not in the cell table. This assigns each cell its modal tile and
-emits an integer `fov` ordered row-major over measured tile positions.
+emits an integer `fov` ordered row-major over the vendor's tile labels, in which
+the letters are the row (y) and the number the column (x): AC13 is row AC,
+column 13. Measured tile positions are used only to check that convention.
 
 Outputs:
   <out>.csv    cell_id, fov, fov_name
@@ -16,12 +18,33 @@ Usage:
 import argparse
 import json
 import os
+import re
 from collections import Counter, defaultdict
 
 import numpy as np
 import pandas as pd
 
 UNASSIGNED = {"UNASSIGNED", "-1", ""}
+TILE_LABEL = re.compile(r"^([A-Z]+)([0-9]+)$")
+# Below this rank correlation between label and position, the labels do not
+# follow the letter-is-row convention and the map is refused.
+MIN_LABEL_AGREEMENT = 0.9
+
+
+def parse_tile_label(name):
+    """
+    (row, column) of a Xenium tile label, or None if it is not one.
+
+    The letters count like spreadsheet columns (A=1, Z=26, AA=27), so rows
+    continue past Z in order.
+    """
+    m = TILE_LABEL.match(str(name))
+    if not m:
+        return None
+    row = 0
+    for ch in m.group(1):
+        row = row * 26 + (ord(ch) - ord("A") + 1)
+    return row, int(m.group(2))
 
 
 def _decode(v):
@@ -79,20 +102,33 @@ def build_map(transcripts_path, verbose=True):
     # Tile origin from the minimum sampled coordinate.
     origins = {f: (min(tile_x[f]), min(tile_y[f])) for f in tile_x}
 
-    # Row-major ordering over physical position.
-    ys = sorted({round(o[1], 0) for o in origins.values()})
-    row_of = {}
-    for f, (ox, oy) in origins.items():
-        row_of[f] = min(range(len(ys)), key=lambda i: abs(ys[i] - oy))
-    ordered = sorted(origins, key=lambda f: (row_of[f], origins[f][0]))
+    grid = {f: parse_tile_label(f) for f in origins}
+    bad = sorted(f for f, rc in grid.items() if rc is None)
+    if bad:
+        raise SystemExit(
+            f"{len(bad)} of {len(grid)} tile labels are not <row letters>"
+            f"<column number>, so no label order exists: {bad[:10]}")
+
+    # The labels must track position: row with y, column with x.
+    tiles = pd.DataFrame({
+        "row": [grid[f][0] for f in grid], "col": [grid[f][1] for f in grid],
+        "x": [origins[f][0] for f in grid], "y": [origins[f][1] for f in grid],
+    })
+    agreement = {
+        "spearman_row_vs_y": round(float(tiles["row"].corr(tiles["y"], method="spearman")), 4),
+        "spearman_col_vs_x": round(float(tiles["col"].corr(tiles["x"], method="spearman")), 4),
+    }
+    if min(agreement.values()) < MIN_LABEL_AGREEMENT:
+        raise SystemExit(
+            f"Tile labels do not follow letter = row (y), number = column (x): "
+            f"{agreement}. Check the convention for this export.")
+
+    # Row-major ordering over the vendor's tile labels.
+    ordered = sorted(grid, key=lambda f: grid[f])
     fov_id = {f: i + 1 for i, f in enumerate(ordered)}
 
-    # Column-major ordering over the same tiles, the perpendicular axis.
-    xs = sorted({round(o[0], 0) for o in origins.values()})
-    col_of = {}
-    for f, (ox, oy) in origins.items():
-        col_of[f] = min(range(len(xs)), key=lambda i: abs(xs[i] - ox))
-    ordered_perp = sorted(origins, key=lambda f: (col_of[f], origins[f][1]))
+    # Column-major ordering over the same labels, the perpendicular axis.
+    ordered_perp = sorted(grid, key=lambda f: (grid[f][1], grid[f][0]))
     fov_perp_id = {f: i + 1 for i, f in enumerate(ordered_perp)}
 
     out = pd.DataFrame({
@@ -109,10 +145,12 @@ def build_map(transcripts_path, verbose=True):
         "n_tiles": int(len(fov_id)),
         "cells_straddling_tiles": int(straddle),
         "fraction_straddling": round(straddle / max(len(out), 1), 6),
-        "ordering": ("row-major over measured tile origins; an assumed "
-                     "acquisition order, no timestamp exists"),
-        "ordering_perp": ("column-major over the same tile origins, the "
+        "ordering": ("row-major over the vendor tile labels, letters = row (y), "
+                     "number = column (x); an assumed acquisition order, no "
+                     "timestamp exists"),
+        "ordering_perp": ("column-major over the same tile labels, the "
                           "perpendicular axis used for the sensitivity check"),
+        "label_position_agreement": agreement,
         "fov_name_to_fov": {k: int(v) for k, v in sorted(fov_id.items(),
                                                          key=lambda kv: kv[1])},
         "fov_name_to_fov_perp": {k: int(v) for k, v in
