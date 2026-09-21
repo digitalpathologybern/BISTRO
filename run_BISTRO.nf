@@ -609,6 +609,7 @@ process batch_effect_evaluation {
     script:
     def he_arg = heAlignmentPath ? "--he_alignment \"${heAlignmentPath}\"" : ""
     def vc_arg = params.vc_column ? "--vc_column ${params.vc_column}" : ""
+    def fe_arg = params.fixed_effect_column ? "--fixed_effect_column ${params.fixed_effect_column}" : ""
     """
     mkdir -p $outputDir
     PUB="${params.output_folder_path}/$outputDir"
@@ -635,6 +636,7 @@ process batch_effect_evaluation {
             --checkpoint_dir "${params.output_folder_path}/$outputDir/checkpoints" \\
             $he_arg \\
             $vc_arg \\
+            $fe_arg \\
             --n_jobs ${task.cpus} \\
             --ci_scheme cluster \\
             --use_log

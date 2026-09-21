@@ -103,17 +103,25 @@ def evaluate_batch_effect_single_layer(
 
       - Equation 3 (Likelihood ratio test):
             Lambda = 2 * (loglik_MELM - loglik_LR)
-        tested against chi-squared with 1 degree of freedom.
-        Uses the ML fit (consistent with BIC comparison).
+        tested against the boundary mixture 0.5*chi2_1 + 0.5*chi2_0, since
+        the FOV variance cannot be negative. Uses the ML fits (consistent
+        with BIC comparison).
+
+      - With vc_column (the TMA's patient), FOVs are nested in it:
+            y_i = b0 + sum_k(bk * I[tissue_i = k]) + v_p[i] + u_j[i] + e_i
+        v_p ~ N(0, sigma_p^2) is the patient intercept shared by that
+        patient's FOVs and u_j ~ N(0, tau^2) the FOV intercept within it.
+        The LRT then tests tau^2 against the model that keeps v_p.
 
       - Equation 4 (Relative bias per FOV):
             b_j = exp(u_hat_j) - 1
         Extracted from the REML fit (unbiased variance components).
 
       - Equation 5 (Bootstrap CI for tau^2):
-        Parametric bootstrap: resample cells within FOV, refit REML MELM,
-        collect tau-squared, take quantiles. Replaces the chi-squared
-        approximation which has poor coverage for small group counts.
+        Cluster bootstrap: resample the top-level groups (FOVs, or patients
+        with their FOVs when nested), refit REML MELM, collect tau-squared,
+        take quantiles. Replaces the chi-squared approximation which has
+        poor coverage for small group counts.
 
     Additionally, this function computes a drift regression by fitting
     the random intercepts against the FOV acquisition index using OLS,
@@ -175,28 +183,44 @@ def evaluate_batch_effect_single_layer(
         use_log = False
 
     # Prepare modelling dataframe with required columns
+    nested = bool(vc_column and vc_column in adata.obs.columns)
     required_cols = [libsize_column, tissue_column, fov_column]
     if use_log:
         required_cols.append('log_LS')
-    if vc_column and vc_column in adata.obs.columns:
+    if nested:
         required_cols.append(vc_column)
     df = adata.obs[required_cols].copy()
+    # A blank label is a missing label, not a level of its own.
+    for col in [tissue_column] + ([vc_column] if nested else []):
+        if not pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col].astype(object).where(
+                df[col].astype(str).str.strip() != '', np.nan)
     df.dropna(inplace=True)
 
     df[tissue_column] = df[tissue_column].astype('category')
     df[fov_column] = df[fov_column].astype('int')
     df['fov_complete'] = 'FOV' + df[fov_column].astype(str)
-    if vc_column and vc_column in df.columns:
-        df[vc_column] = df[vc_column].astype('category')
-        print(f"  Variance component: {vc_column} "
-              f"({df[vc_column].nunique()} levels)")
-
-    # Build vc_formula for MELM (None if no extra VC)
-    vc_formula = None
-    if vc_column and vc_column in df.columns:
-        vc_formula = {vc_column: f"0 + C({vc_column})"}
-
     fov_col = 'fov_complete'
+
+    # Without an extra variance component FOV is the grouping factor. With one
+    # (the TMA's patient) FOVs are nested in it: the patient is the group and the
+    # FOV a variance component inside it, so the cores of one patient share that
+    # patient's intercept and the FOV variance is what remains within a patient.
+    if nested:
+        df[vc_column] = df[vc_column].astype(str).astype('category')
+        n_per_fov = df.groupby(fov_col)[vc_column].nunique()
+        if (n_per_fov > 1).any():
+            raise ValueError(
+                f"{int((n_per_fov > 1).sum())} FOVs span more than one "
+                f"'{vc_column}'; FOVs must be nested in '{vc_column}'.")
+        group_col = vc_column
+        vc_formula = {'fov': f"0 + C({fov_col})"}
+        print(f"  Nested design: {df[fov_col].nunique()} FOVs in "
+              f"{df[vc_column].nunique()} levels of '{vc_column}'")
+    else:
+        group_col = fov_col
+        vc_formula = None
+
     y_col = 'log_LS' if use_log else libsize_column
     formula = f"{y_col} ~ C({tissue_column})"
 
@@ -210,40 +234,47 @@ def evaluate_batch_effect_single_layer(
     model_ols_fov = smf.ols(formula=formula_fov, data=df).fit()
 
     # ---- Model 3a: MELM with ML (for BIC/AIC/LRT model comparison) ----
-    vc_desc = f" + vc({vc_column})" if vc_formula else ""
-    print(f"  Fitting MELM (ML): {formula} + (1|{fov_col}){vc_desc}")
-    model_melm_ml = smf.mixedlm(
-        formula=formula, groups=df[fov_col], data=df, re_formula='~1',
-        vc_formula=vc_formula,
-    ).fit(method=["powell"], reml=False)
+    def _fit_melm(reml, vc=vc_formula):
+        return smf.mixedlm(
+            formula=formula, groups=df[group_col], data=df, re_formula='~1',
+            vc_formula=vc,
+        ).fit(method=["powell"], reml=reml)
+
+    model_desc = (f"(1|{vc_column}) + (1|{vc_column}:{fov_col})" if nested
+                  else f"(1|{fov_col})")
+    print(f"  Fitting MELM (ML): {formula} + {model_desc}")
+    model_melm_ml = _fit_melm(reml=False)
 
     # ---- Model 3b: MELM with REML (for unbiased intercept extraction) ----
-    print(f"  Fitting MELM (REML): {formula} + (1|{fov_col}){vc_desc}")
-    model_melm_reml = smf.mixedlm(
-        formula=formula, groups=df[fov_col], data=df, re_formula='~1',
-        vc_formula=vc_formula,
-    ).fit(method=["powell"], reml=True)
+    print(f"  Fitting MELM (REML): {formula} + {model_desc}")
+    model_melm_reml = _fit_melm(reml=True)
+
+    # The model without the FOV term, against which the FOV term is tested:
+    # the tissue-only OLS, or with nesting the model that keeps the patient.
+    if nested:
+        print(f"  Fitting MELM (ML) without FOV: {formula} + (1|{vc_column})")
+        model_no_fov = _fit_melm(reml=False, vc=None)
+    else:
+        model_no_fov = model_ols
 
     # ---- Compute AIC and BIC from ML fit (for model comparison) ----
-    aic_ols, bic_ols = model_ols.aic, model_ols.bic
+    aic_ols, bic_ols = model_no_fov.aic, model_no_fov.bic
     aic_ols_fov, bic_ols_fov = model_ols_fov.aic, model_ols_fov.bic
     aic_melm, bic_melm = model_melm_ml.aic, model_melm_ml.bic
 
-    print(f"  OLS (tissue):     AIC = {aic_ols:.1f}, BIC = {bic_ols:.1f}")
+    print(f"  Without FOV:      AIC = {aic_ols:.1f}, BIC = {bic_ols:.1f}")
     print(f"  OLS (tissue+FOV): AIC = {aic_ols_fov:.1f}, BIC = {bic_ols_fov:.1f}")
-    print(f"  MELM ML (1|FOV):  AIC = {aic_melm:.1f}, BIC = {bic_melm:.1f}")
+    print(f"  MELM ML:          AIC = {aic_melm:.1f}, BIC = {bic_melm:.1f}")
 
-    # ---- LRT p-value: OLS vs MELM-ML (Equation 3) ----
-    n_vc_added = 1 + (1 if (vc_column and vc_column in df.columns) else 0)
-    p_value = lrt_pvalue(model_ols, model_melm_ml, n_vc=n_vc_added)
-    print(f"  LRT p-value (OLS vs MELM-ML): {p_value:.4e}")
+    # ---- LRT p-value: without FOV vs MELM-ML (Equation 3) ----
+    # One variance component, the FOV's, is tested in both designs.
+    p_value = lrt_pvalue(model_no_fov, model_melm_ml, n_vc=1)
+    print(f"  LRT p-value (FOV variance): {p_value:.4e}")
 
     # ---- Extract random intercepts from REML fit (Equation 4) ----
     # Using REML for intercepts because ML underestimates variance components,
     # which biases the per-FOV random intercepts used in visualization and drift.
-    re_df = pd.DataFrame(model_melm_reml.random_effects).T.reset_index()
-    re_df = re_df.rename(columns={'index': 'fov', 'Group': 'random_intercept'})
-    re_df['fov'] = re_df['fov'].str.replace('FOV', '').astype(int)
+    re_df = _fov_random_effects(model_melm_reml, vc_column if nested else None)
     if use_log and response_is_library_size:
         re_df['relative_bias'] = np.exp(re_df['random_intercept']) - 1
     else:
@@ -252,23 +283,28 @@ def evaluate_batch_effect_single_layer(
     re_df['dataset'] = dataset_name
 
     # ---- Variance estimates from both fits ----
-    var_hat_ml = model_melm_ml.cov_re.iloc[0, 0]
-    var_hat_reml = model_melm_reml.cov_re.iloc[0, 0]
+    # tau^2 is always the FOV variance; with nesting it is the variance of the
+    # FOV component and the group variance is the patient's.
+    var_vc_reml = np.nan
+    if nested:
+        var_hat_ml = model_melm_ml.vcomp[0]
+        var_hat_reml = model_melm_reml.vcomp[0]
+        var_vc_reml = model_melm_reml.cov_re.iloc[0, 0]
+    else:
+        var_hat_ml = model_melm_ml.cov_re.iloc[0, 0]
+        var_hat_reml = model_melm_reml.cov_re.iloc[0, 0]
 
     print(f"  Var(tau_fov^2) ML   = {var_hat_ml:.6f}")
     print(f"  Var(tau_fov^2) REML = {var_hat_reml:.6f}")
-
-    # Extract VC variance if present (e.g. patient)
-    var_vc_reml = np.nan
-    if vc_column and len(model_melm_reml.vcomp) > 0:
-        var_vc_reml = model_melm_reml.vcomp[0]
+    if nested:
         print(f"  Var({vc_column}) REML = {var_vc_reml:.6f}")
 
     # ---- Bootstrap CI for tau-squared (replaces chi-squared, Equation 5) ----
     print(f"  Computing bootstrap CI for tau^2 ({n_boot_ci} iterations)...")
     var_ci = bootstrap_var_ci(
-        df, formula, fov_col, n_boot=n_boot_ci, alpha=0.05, seed=42,
-        n_jobs=n_jobs, scheme=ci_scheme, vc_formula=vc_formula
+        df, formula, group_col, n_boot=n_boot_ci, alpha=0.05, seed=42,
+        n_jobs=n_jobs, scheme=ci_scheme, vc_formula=vc_formula,
+        nested_col=fov_col if nested else None,
     )
     print(f"  Bootstrap CI = [{var_ci[0]:.6f}, {var_ci[1]:.6f}]")
 
@@ -323,7 +359,7 @@ def evaluate_batch_effect_single_layer(
         'bic_mixedlm_random_intercept': bic_melm,
         'pvalue_ols_no_fov_vs_mixedlm_random_intercept': p_value,
         # Model objects
-        'model_no_fov': model_ols,
+        'model_no_fov': model_no_fov,
         'model_with_fov': model_ols_fov,
         'mixedlm_model_ml': model_melm_ml,
         'mixedlm_model_reml': model_melm_reml,
@@ -359,8 +395,38 @@ def evaluate_batch_effect_single_layer(
             np.nanstd(df[y_col].to_numpy(dtype=float))
             / max(abs(float(np.nanmean(df[y_col].to_numpy(dtype=float)))), 1e-12)
             < 1e-6),
-        'lrt_reference': f'0.5*chi2_{n_vc_added}+0.5*chi2_{n_vc_added-1}',
+        'lrt_reference': '0.5*chi2_1+0.5*chi2_0',
+        'model_structure': f'fov_in_{vc_column}' if nested else 'fov',
+        'fixed_effect_column': tissue_column,
     }
+
+
+def _fov_random_effects(model, vc_column=None):
+    """
+    Per-FOV random intercepts from a fitted MixedLM.
+
+    Without nesting each group is a FOV. With nesting each group is a level of
+    vc_column; its FOVs are the variance-component entries, named
+    'fov[C(fov_complete)[FOV12]]', and the group's own intercept is carried
+    alongside each of its FOVs.
+    """
+    rows = []
+    for group, eff in model.random_effects.items():
+        if vc_column is None:
+            rows.append({'fov': group, 'random_intercept': eff['Group']})
+            continue
+        for name, value in eff.items():
+            if name == 'Group':
+                continue
+            rows.append({
+                'fov': name.rsplit('[', 1)[1].rstrip(']'),
+                'random_intercept': value,
+                vc_column: group,
+                f'{vc_column}_intercept': eff['Group'],
+            })
+    re_df = pd.DataFrame(rows)
+    re_df['fov'] = re_df['fov'].str.replace('FOV', '').astype(int)
+    return re_df
 
 
 # ============================================================================
@@ -598,7 +664,7 @@ def run_batch_effect_pipeline(
     output_dir, dataset_name=None, use_log=True, metadata_csv=None,
     n_jobs=None, ci_scheme="cluster",
     he_alignment_path=None, pixel_size=0.2125, n_boot_ci=200,
-    vc_column=None, checkpoint_dir=None,
+    vc_column=None, checkpoint_dir=None, fixed_effect_column=None,
 ):
     """
     Run the full batch effect evaluation across all normalization layers.
@@ -644,6 +710,10 @@ def run_batch_effect_pipeline(
         Number of bootstrap iterations for tau-squared CI (default 200).
     vc_column : str, optional
         Column name for an additional variance component in the MELM.
+    fixed_effect_column : str, optional
+        obs column used as the fixed effect instead of the tissue
+        annotation (e.g. 'location' for the TMA's primary, metastasis and
+        normal cores).
     """
     os.makedirs(output_dir, exist_ok=True)
 
@@ -683,6 +753,11 @@ def run_batch_effect_pipeline(
                             polygon_out_path=os.path.join(
                                 output_dir,
                                 f"{dataset_name}_tissue_polygons.geojson"))
+
+    tissue_column = fixed_effect_column or 'tissue_annotations'
+    if tissue_column not in sd_obj.tables['filtered'].obs.columns:
+        raise ValueError(f"Fixed-effect column '{tissue_column}' is not in obs")
+    print(f"Fixed effect: {tissue_column}")
 
     # ---- Discover normalization layers ----
     norm_map = discover_norm_layers(nextflow_output)
@@ -821,6 +896,7 @@ def run_batch_effect_pipeline(
                 sd_obj, layer_name, dataset_name, technology,
                 use_log=use_log, n_boot_ci=n_boot_ci,
                 vc_column=vc_column, n_jobs=n_jobs, ci_scheme=ci_scheme,
+                tissue_column=tissue_column,
             )
 
             re_layer = result['random_effects_mixedlm_model_random_intercept']
@@ -860,6 +936,8 @@ def run_batch_effect_pipeline(
                 'lrt_reference': result.get('lrt_reference', ''),
                 'vc_column': result.get('vc_column', ''),
                 'var_vc_reml': result.get('var_vc_reml', np.nan),
+                'model_structure': result.get('model_structure', 'fov'),
+                'fixed_effect_column': result.get('fixed_effect_column', ''),
             }
 
             # Write the per-layer checkpoint immediately, before moving on.
@@ -958,11 +1036,13 @@ def build_parser():
     p.add_argument("--use_log", action="store_true", default=True,
                    help="Log-transform library sizes before modelling")
     p.add_argument("--vc_column", default=None,
-                   help="Column name for an additional variance component "
-                        "in the MELM (e.g. 'patient' for TMA datasets with "
-                        "nested patient/FOV structure). The column must be "
-                        "present in the metadata CSV. If not provided, the "
-                        "standard FOV-only random intercept model is used.")
+                   help="Column in obs that FOVs are nested in (e.g. "
+                        "'patient' for a TMA). It becomes the grouping factor "
+                        "and FOV a variance component within it. If not "
+                        "provided, FOV is the only random intercept.")
+    p.add_argument("--fixed_effect_column", default=None,
+                   help="obs column to use as the fixed effect instead of the "
+                        "tissue annotation (e.g. 'location' for a TMA).")
     p.add_argument("--checkpoint_dir", default=None,
                    help="Directory for per-layer checkpoints, persistent "
                         "across job restarts. Layers with a complete "
@@ -988,6 +1068,7 @@ def main():
         n_boot_ci=args.n_boot_ci,
         vc_column=args.vc_column,
         checkpoint_dir=args.checkpoint_dir,
+        fixed_effect_column=args.fixed_effect_column,
         n_jobs=args.n_jobs,
         ci_scheme=args.ci_scheme,
     )

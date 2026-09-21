@@ -105,14 +105,16 @@ def _bootstrap_refit_worker(args):
     """
     One bootstrap iteration for the random-intercept variance.
 
-    scheme='cluster' resamples FOVs with replacement, relabelling each draw with
-    a fresh synthetic group id. scheme='within' resamples cells inside a fixed
-    FOV set.
+    scheme='cluster' resamples the groups with replacement, relabelling each draw
+    with a fresh synthetic group id. scheme='within' resamples cells inside each
+    FOV. With nested_col the groups are patients and the FOVs in nested_col are
+    relabelled per draw too, so a patient drawn twice contributes two sets of
+    FOVs; tau-squared is then the FOV variance component, not the group variance.
 
     Parameters
     ----------
     args : tuple
-        (boot_idx, df, formula, group_col, seed, scheme, vc_formula)
+        (boot_idx, df, formula, group_col, seed, scheme, vc_formula, nested_col)
 
     Returns
     -------
@@ -121,26 +123,33 @@ def _bootstrap_refit_worker(args):
     """
     import statsmodels.formula.api as smf
 
-    boot_idx, df, formula, group_col, seed, scheme, vc_formula = args
+    boot_idx, df, formula, group_col, seed, scheme, vc_formula, nested_col = args
     rng = np.random.default_rng(seed + boot_idx)
 
     if scheme == "cluster":
-        groups = list(df.groupby(group_col).indices.items())
+        groups = list(df.groupby(group_col, observed=True).indices.items())
         picks = rng.choice(len(groups), size=len(groups), replace=True)
         parts = []
         for new_id, gi in enumerate(picks):
             part = df.iloc[groups[gi][1]].copy()
             part["_boot_group"] = new_id
+            if nested_col:
+                part[nested_col] = f"B{new_id}_" + part[nested_col].astype(str)
             parts.append(part)
         df_boot = pd.concat(parts, ignore_index=True)
         fit_groups = df_boot["_boot_group"]
     else:
         parts = []
-        for _, group_df in df.groupby(group_col):
+        for _, group_df in df.groupby(nested_col or group_col, observed=True):
             n = len(group_df)
             parts.append(group_df.iloc[rng.choice(n, size=n, replace=True)])
         df_boot = pd.concat(parts, ignore_index=True)
         fit_groups = df_boot[group_col]
+
+    # A fixed-effect level that no drawn group carries would be an all-zero
+    # column and a singular fit.
+    for col in df_boot.select_dtypes("category").columns:
+        df_boot[col] = df_boot[col].cat.remove_unused_categories()
 
     try:
         kwargs = dict(formula=formula, groups=fit_groups, data=df_boot,
@@ -149,13 +158,14 @@ def _bootstrap_refit_worker(args):
             kwargs["vc_formula"] = vc_formula
         model = smf.mixedlm(**kwargs).fit(method=["powell"], reml=True,
                                           maxiter=200)
-        return model.cov_re.iloc[0, 0]
+        return model.vcomp[0] if nested_col else model.cov_re.iloc[0, 0]
     except Exception:
         return np.nan
 
 
 def bootstrap_var_ci(df, formula, group_col, n_boot=200, alpha=0.05,
-                     seed=42, n_jobs=None, scheme="cluster", vc_formula=None):
+                     seed=42, n_jobs=None, scheme="cluster", vc_formula=None,
+                     nested_col=None):
     """
     Parametric bootstrap confidence interval for the random intercept
     variance (tau-squared) from a mixed-effects linear model.
@@ -187,6 +197,9 @@ def bootstrap_var_ci(df, formula, group_col, n_boot=200, alpha=0.05,
         Resampling unit. 'cluster' resamples FOVs, 'within' resamples cells.
     vc_formula : dict or None
         Extra variance components, passed through to every refit.
+    nested_col : str or None
+        FOV column nested in group_col. When given, the interval is for the
+        FOV variance component and whole groups are resampled with their FOVs.
 
     Returns
     -------
@@ -202,7 +215,7 @@ def bootstrap_var_ci(df, formula, group_col, n_boot=200, alpha=0.05,
 
     # Prepare worker arguments
     worker_args = [
-        (b, df, formula, group_col, seed, scheme, vc_formula)
+        (b, df, formula, group_col, seed, scheme, vc_formula, nested_col)
         for b in range(n_boot)
     ]
 
@@ -258,7 +271,8 @@ def lrt_pvalue(model_restricted, model_full, n_vc=1, boundary=True):
     if not boundary:
         return chi2.sf(lr_stat, n_vc)
     upper = chi2.sf(lr_stat, n_vc)
-    lower = chi2.sf(lr_stat, n_vc - 1) if n_vc > 1 else 0.0
+    # chi2_0 is a point mass at zero: P(chi2_0 >= stat) is 1 at stat = 0, else 0.
+    lower = chi2.sf(lr_stat, n_vc - 1) if n_vc > 1 else float(lr_stat <= 0)
     return 0.5 * (upper + lower)
 
 
