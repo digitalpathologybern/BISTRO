@@ -280,22 +280,30 @@ def phase2a_clustering_stability(
 # PHASE 3: HVG vs. RANDOM GENE CONTROL
 # ============================================================================
 
+# Stamped on every Phase 3 result and checkpoint. A result without it came from
+# the earlier protocol, in which the two arms were not clustered on the same
+# cells, and is recomputed rather than reused.
+PHASE3_PROTOCOL = "shared_subsample_v2"
+PHASE3_MAX_CELLS = 50_000
+
+
 def phase3_hvg_vs_random(
     adata, layer_name: str, fraction: float, hvg_mask: np.ndarray,
-    cfg: dict, *, hvg_pca_embedding: np.ndarray | None = None,
-    phase3_ckpt_path: Path | None = None,
+    cfg: dict, *, phase3_ckpt_path: Path | None = None,
 ) -> tuple[float, list[float]]:
     """
     Compare HVG clustering stability against random gene sets.
+
+    Both arms run on the same cells: one subsample of at most 50,000 cells,
+    drawn once, on which the HVG set and every random set get their own PCA
+    and the same bootstrap scheme. Stability depends on how many cells two
+    bootstraps share, so an arm clustered on a different cell set would not
+    be comparable.
 
     Returns (hvg_stability_ARI, list_of_random_stability_ARIs).
     """
     boot_per_eval = cfg.get("n_bootstrap_phase3", 100)
 
-    # hvg_stab, _ = phase2a_clustering_stability(
-    #     adata, layer_name, hvg_mask, cfg,
-    #     n_bootstrap=boot_per_eval, pca_embedding=hvg_pca_embedding,
-    # )
     # Load existing Phase 3 sub-checkpoint
     p3_state = {}
     if phase3_ckpt_path is not None and phase3_ckpt_path.exists():
@@ -305,6 +313,11 @@ def phase3_hvg_vs_random(
             log(f"      Phase 3 sub-checkpoint: {list(p3_state.keys())}")
         except Exception:
             p3_state = {}
+    if p3_state.get("protocol") != PHASE3_PROTOCOL:
+        if p3_state:
+            log("      Phase 3 sub-checkpoint predates the shared-subsample "
+                "protocol, discarded")
+        p3_state = {"protocol": PHASE3_PROTOCOL}
 
     def _save_p3():
         if phase3_ckpt_path is not None:
@@ -324,28 +337,35 @@ def phase3_hvg_vs_random(
                 if os.path.exists(tmp):
                     os.unlink(tmp)
 
-    # HVG stability
+    # One cell set for both arms. The draw and the random masks after it come
+    # from the same generator as before, so the random arm is unchanged.
+    rng_masks = np.random.default_rng(cfg["seed"] + 9999)
+    if adata.n_obs > PHASE3_MAX_CELLS:
+        cell_idx = rng_masks.choice(adata.n_obs, size=PHASE3_MAX_CELLS,
+                                    replace=False)
+        adata_compute = adata[cell_idx].copy()
+    else:
+        adata_compute = adata.copy()
+
+    # HVG stability, on the shared cells
     if "hvg_stab" in p3_state:
         hvg_stab = p3_state["hvg_stab"]
         log(f"      HVG stability loaded from checkpoint: {hvg_stab:.4f}")
     else:
-        hvg_stab, _ = phase2a_clustering_stability(
-            adata, layer_name, hvg_mask, cfg,
-            n_bootstrap=boot_per_eval, pca_embedding=hvg_pca_embedding,
+        hvg_pca = compute_pca_embedding(
+            adata_compute, layer_name, hvg_mask, cfg["n_pcs"], seed=cfg["seed"],
         )
+        hvg_stab, _ = phase2a_clustering_stability(
+            adata_compute, layer_name, hvg_mask, cfg,
+            n_bootstrap=boot_per_eval, pca_embedding=hvg_pca,
+        )
+        del hvg_pca
         p3_state["hvg_stab"] = hvg_stab
         _save_p3()
         log(f"      HVG stability: {hvg_stab:.4f} (checkpointed)")
 
-    rng_masks = np.random.default_rng(cfg["seed"] + 9999)
     rand_stabs: list[float] = p3_state.get("rand_stabs", [])
     n_done = len(rand_stabs)
-
-    if adata.n_obs > 50_000:
-        cell_idx = rng_masks.choice(adata.n_obs, size=50_000, replace=False)
-        adata_compute = adata[cell_idx].copy()
-    else:
-        adata_compute = adata.copy()
 
     # Advance RNG state to match where we left off
     for r in range(n_done):
@@ -725,6 +745,15 @@ def run_single_layer(
     completed_fracs: set[float] = set()
     results: list[dict] = []
     if existing_df is not None and len(existing_df) > 0:
+        # Fractions with a Phase 3 from the earlier protocol are redone.
+        protocol = existing_df.get("phase3_protocol",
+                                   pd.Series(np.nan, index=existing_df.index))
+        stale = (existing_df["hvg_fraction"] < 1.0) & (protocol != PHASE3_PROTOCOL)
+        if stale.any():
+            log(f"  Phase 3 predates the shared-subsample protocol for "
+                f"fractions {sorted(existing_df.loc[stale, 'hvg_fraction'])}; "
+                f"recomputing them")
+            existing_df = existing_df[~stale]
         results = existing_df.to_dict("records")
         completed_fracs = set(existing_df["hvg_fraction"].unique())
         log(f"  Resuming: fractions already done = {completed_fracs}")
@@ -830,15 +859,16 @@ def run_single_layer(
             log("    Phase 2a: skipped (checkpoint)")
 
         # ---- Phase 3: HVG vs random (skip for frac=1.0) -------------------
-        if frac < 1.0 and "phase3" not in phase_done:
+        if frac < 1.0 and phase_done.get("phase3_protocol") != PHASE3_PROTOCOL:
             try:
                 log("    Phase 3: HVG vs. random control ...")
                 p3_ckpt = frac_tmp / "phase_checkpoints" / f"{layer_safe}_frac{frac:.2f}_phase3.json"
                 hvg_stab, rand_stabs = phase3_hvg_vs_random(
                     adata, layer_name, frac, hvg_mask, cfg,
-                    hvg_pca_embedding=hvg_pca,
                     phase3_ckpt_path=p3_ckpt,
                 )
+                row["phase3_protocol"] = PHASE3_PROTOCOL
+                row["phase3_n_cells"] = min(adata.n_obs, PHASE3_MAX_CELLS)
                 row["hvg_stability"] = hvg_stab
                 row["random_stability_mean"] = float(np.nanmean(rand_stabs))
                 row["random_stability_std"] = float(np.nanstd(rand_stabs))
@@ -855,6 +885,7 @@ def run_single_layer(
                     f"+/- {np.nanstd(rand_stabs):.4f}")
  
                 phase_done["phase3"] = True
+                phase_done["phase3_protocol"] = PHASE3_PROTOCOL
                 phase_done["_row"] = row
                 save_phase_ckpt(ph_ckpt, phase_done)
 
