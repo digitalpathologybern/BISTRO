@@ -29,7 +29,7 @@ print('Scaling values calculated')
 effective_lib_size <- colSums(counts) * scaling_values
 
 # Apply the effective library size to the count data
-TMM <- counts / effective_lib_size
+TMM <- sweep(counts, 2, effective_lib_size, FUN = "/")
 
 # Save table with the correct format
 tmm_table <- data.frame(t(TMM))

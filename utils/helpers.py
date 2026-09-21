@@ -103,56 +103,75 @@ def var_ci_chisq(var_hat, n_groups, alpha=0.05):
 
 def _bootstrap_refit_worker(args):
     """
-    Worker function for a single parametric bootstrap iteration.
-    Resamples cells with replacement within each FOV, refits the REML
-    MELM, and returns the estimated tau-squared.
+    One bootstrap iteration for the random-intercept variance.
+
+    scheme='cluster' resamples the groups with replacement, relabelling each draw
+    with a fresh synthetic group id. scheme='within' resamples cells inside each
+    FOV. With nested_col the groups are patients and the FOVs in nested_col are
+    relabelled per draw too, so a patient drawn twice contributes two sets of
+    FOVs; tau-squared is then the FOV variance component, not the group variance.
 
     Parameters
     ----------
     args : tuple
-        (boot_idx, df, formula, group_col, seed)
+        (boot_idx, df, formula, group_col, seed, scheme, vc_formula, nested_col)
 
     Returns
     -------
     float
-        Estimated tau-squared from the refitted model, or np.nan on failure.
+        tau-squared from the refitted model, or np.nan on failure.
     """
     import statsmodels.formula.api as smf
 
-    boot_idx, df, formula, group_col, seed = args
+    boot_idx, df, formula, group_col, seed, scheme, vc_formula, nested_col = args
     rng = np.random.default_rng(seed + boot_idx)
 
-    # Resample cells with replacement within each FOV
-    resampled_indices = []
-    for _, group_df in df.groupby(group_col):
-        n = len(group_df)
-        boot_idx_arr = rng.choice(n, size=n, replace=True)
-        resampled_indices.append(group_df.iloc[boot_idx_arr])
+    if scheme == "cluster":
+        groups = list(df.groupby(group_col, observed=True).indices.items())
+        picks = rng.choice(len(groups), size=len(groups), replace=True)
+        parts = []
+        for new_id, gi in enumerate(picks):
+            part = df.iloc[groups[gi][1]].copy()
+            part["_boot_group"] = new_id
+            if nested_col:
+                part[nested_col] = f"B{new_id}_" + part[nested_col].astype(str)
+            parts.append(part)
+        df_boot = pd.concat(parts, ignore_index=True)
+        fit_groups = df_boot["_boot_group"]
+    else:
+        parts = []
+        for _, group_df in df.groupby(nested_col or group_col, observed=True):
+            n = len(group_df)
+            parts.append(group_df.iloc[rng.choice(n, size=n, replace=True)])
+        df_boot = pd.concat(parts, ignore_index=True)
+        fit_groups = df_boot[group_col]
 
-    df_boot = pd.concat(resampled_indices, ignore_index=True)
+    # A fixed-effect level that no drawn group carries would be an all-zero
+    # column and a singular fit.
+    for col in df_boot.select_dtypes("category").columns:
+        df_boot[col] = df_boot[col].cat.remove_unused_categories()
 
     try:
-        model = smf.mixedlm(
-            formula=formula,
-            groups=df_boot[group_col],
-            data=df_boot,
-            re_formula='~1'
-        ).fit(method=["powell"], reml=True, maxiter=200)
-        return model.cov_re.iloc[0, 0]
+        kwargs = dict(formula=formula, groups=fit_groups, data=df_boot,
+                      re_formula="~1")
+        if vc_formula:
+            kwargs["vc_formula"] = vc_formula
+        model = smf.mixedlm(**kwargs).fit(method=["powell"], reml=True,
+                                          maxiter=200)
+        return model.vcomp[0] if nested_col else model.cov_re.iloc[0, 0]
     except Exception:
         return np.nan
 
 
 def bootstrap_var_ci(df, formula, group_col, n_boot=200, alpha=0.05,
-                     seed=42, n_jobs=None):
+                     seed=42, n_jobs=None, scheme="cluster", vc_formula=None,
+                     nested_col=None):
     """
     Parametric bootstrap confidence interval for the random intercept
     variance (tau-squared) from a mixed-effects linear model.
 
-    For each iteration, cells are resampled with replacement within each
-    FOV (preserving the FOV structure), the REML MELM is refitted, and
-    tau-squared is extracted. The CI is taken as the alpha/2 and
-    1-alpha/2 quantiles of the bootstrap distribution.
+    scheme selects the resampling unit. vc_formula, when given, is carried into
+    every refit.
 
     This replaces the chi-squared approximation (var_ci_chisq) which has
     poor coverage for small group counts.
@@ -173,7 +192,14 @@ def bootstrap_var_ci(df, formula, group_col, n_boot=200, alpha=0.05,
     seed : int
         Random seed for reproducibility.
     n_jobs : int or None
-        Number of parallel workers. If None, uses min(n_boot, cpu_count).
+        Number of parallel workers. Pass task.cpus under SLURM.
+    scheme : {'cluster', 'within'}
+        Resampling unit. 'cluster' resamples FOVs, 'within' resamples cells.
+    vc_formula : dict or None
+        Extra variance components, passed through to every refit.
+    nested_col : str or None
+        FOV column nested in group_col. When given, the interval is for the
+        FOV variance component and whole groups are resampled with their FOVs.
 
     Returns
     -------
@@ -189,7 +215,7 @@ def bootstrap_var_ci(df, formula, group_col, n_boot=200, alpha=0.05,
 
     # Prepare worker arguments
     worker_args = [
-        (b, df, formula, group_col, seed)
+        (b, df, formula, group_col, seed, scheme, vc_formula, nested_col)
         for b in range(n_boot)
     ]
 
@@ -212,13 +238,16 @@ def bootstrap_var_ci(df, formula, group_col, n_boot=200, alpha=0.05,
     return np.array([lower, upper])
 
 
-def lrt_pvalue(model_restricted, model_full):
+def lrt_pvalue(model_restricted, model_full, n_vc=1, boundary=True):
     """
     Likelihood ratio test p-value comparing a restricted model to a full model.
 
     Implements Equation 3 from the BISTRO manuscript:
         Lambda = 2 * (loglik_full - loglik_restricted)
-    tested against chi-squared with 1 degree of freedom.
+
+    Referenced to the boundary-corrected mixture
+        0.5 * chi2_{n_vc} + 0.5 * chi2_{n_vc - 1}
+    (Self and Liang 1987; Stram and Lee 1994).
 
     Parameters
     ----------
@@ -226,6 +255,11 @@ def lrt_pvalue(model_restricted, model_full):
         The restricted (null) model (e.g., OLS without FOV).
     model_full : statsmodels results object
         The full model (e.g., MELM with FOV random intercept).
+    n_vc : int
+        Number of variance components the full model adds over the restricted one.
+    boundary : bool
+        Use the boundary-corrected mixture reference. Set False to reproduce
+        the naive chi2_1 test.
 
     Returns
     -------
@@ -233,8 +267,13 @@ def lrt_pvalue(model_restricted, model_full):
         p-value from the likelihood ratio test.
     """
     lr_stat = 2 * (model_full.llf - model_restricted.llf)
-    p_value = chi2.sf(lr_stat, 1)
-    return p_value
+    lr_stat = max(lr_stat, 0.0)
+    if not boundary:
+        return chi2.sf(lr_stat, n_vc)
+    upper = chi2.sf(lr_stat, n_vc)
+    # chi2_0 is a point mass at zero: P(chi2_0 >= stat) is 1 at stat = 0, else 0.
+    lower = chi2.sf(lr_stat, n_vc - 1) if n_vc > 1 else float(lr_stat <= 0)
+    return 0.5 * (upper + lower)
 
 
 # ============================================================================
@@ -245,12 +284,18 @@ def lrt_pvalue(model_restricted, model_full):
 # coordinate schema where all spatial columns are in um.
 # ============================================================================
 
-def get_fov_size(technology, scale=1):
+# Xenium rasterisation pitch in um. Override per dataset with params.fovTileUm.
+XENIUM_TILE_UM = [600.0, 720.0]
+XENIUM_TILE_UM_PROTOTYPE = [600.0, 875.0]
+
+
+def get_fov_size(technology, scale=1, tile_um=None):
     """
     Return the FOV tile dimensions [width_um, height_um] for a given
     iST technology, used for pseudo-FOV rasterization.
 
     All values are in **micrometers**.
+
 
     Parameters
     ----------
@@ -258,14 +303,19 @@ def get_fov_size(technology, scale=1):
         One of 'CosMx', 'Xenium', 'MERSCOPE'.
     scale : float
         Scaling factor applied to the FOV dimensions (default 1).
+    tile_um : sequence of two floats, optional
+        Explicit [width_um, height_um] pitch, overriding the default.
 
     Returns
     -------
     list
         [width_um, height_um].
     """
+    if tile_um is not None:
+        w, h = float(tile_um[0]), float(tile_um[1])
+        return [w / scale, h / scale]
     if technology == 'Xenium':
-        return [600 / scale, 720 / scale]
+        return [XENIUM_TILE_UM[0] / scale, XENIUM_TILE_UM[1] / scale]
     elif technology == 'CosMx':
         return [510.72, 510.72]
     elif technology == 'MERSCOPE':
@@ -282,6 +332,117 @@ def get_fov_size(technology, scale=1):
 # Updated: coordinates are now in um (no /1000 conversion), tile sizes in um,
 # output center columns use new naming convention.
 # ============================================================================
+
+COORD_NN_MIN_UM = 2.0
+COORD_NN_MAX_UM = 200.0
+COORD_NN_AREA_RATIO_MIN = 0.25
+
+
+def validate_coordinate_scale(meta, technology, raise_on_fail=True,
+                              sample_n=20000, seed=0):
+    """
+    Check that cell centroid coordinates are plausibly in micrometers.
+
+    The primary test compares the median nearest-neighbour distance between
+    centroids against the square root of the median cell area from the same
+    table. Both are lengths in micrometers, so their ratio is dimensionless
+    and independent of tissue density and platform, while a coordinate array
+    scaled by a wrong unit factor moves the numerator only.
+
+    When no area column is present the test falls back to an absolute range
+    on the nearest-neighbour distance.
+
+    Parameters
+    ----------
+    meta : pd.DataFrame
+        Cell metadata carrying a coordinate pair and, ideally, 'area_um2'.
+    technology : str
+        Platform name, used only in the message.
+    raise_on_fail : bool
+        Raise ValueError instead of warning.
+    sample_n : int
+        Number of cells sampled for the neighbour search.
+    seed : int
+        Seed for the subsample.
+
+    Returns
+    -------
+    dict
+        median_nn_um, median_area_um2, nn_area_ratio, n_sampled,
+        coord_columns, test, ok.
+    """
+    import numpy as np
+
+    blank = {'median_nn_um': None, 'median_area_um2': None,
+             'nn_area_ratio': None, 'n_sampled': 0,
+             'coord_columns': None, 'test': None, 'ok': None}
+
+    for xc, yc in (('x_global_um', 'y_global_um'),
+                   ('x_local_um', 'y_local_um'),
+                   ('x_centroid', 'y_centroid')):
+        if xc in meta.columns and yc in meta.columns:
+            break
+    else:
+        return blank
+
+    xy = meta[[xc, yc]].to_numpy(dtype=float)
+    keep = np.isfinite(xy).all(axis=1)
+    xy = xy[keep]
+    if len(xy) < 10:
+        return dict(blank, n_sampled=int(len(xy)), coord_columns=(xc, yc))
+
+    area = None
+    if 'area_um2' in meta.columns:
+        a = meta.loc[keep, 'area_um2'].to_numpy(dtype=float)
+    else:
+        a = None
+
+    if len(xy) > sample_n:
+        idx = np.random.default_rng(seed).choice(len(xy), sample_n,
+                                                 replace=False)
+        xy = xy[idx]
+        if a is not None:
+            a = a[idx]
+
+    if a is not None:
+        a = a[np.isfinite(a) & (a > 0)]
+        if len(a) >= 10:
+            area = float(np.median(a))
+
+    from scipy.spatial import cKDTree
+    d, _ = cKDTree(xy).query(xy, k=2)
+    median_nn = float(np.median(d[:, 1]))
+
+    if area:
+        ratio = median_nn / np.sqrt(area)
+        ok = ratio >= COORD_NN_AREA_RATIO_MIN
+        test = 'nn_over_sqrt_area'
+        detail = (f"median nearest-neighbour distance {median_nn:.2f} um "
+                  f"against sqrt(median cell area) {np.sqrt(area):.2f} um "
+                  f"gives a ratio of {ratio:.3f}, below the minimum "
+                  f"{COORD_NN_AREA_RATIO_MIN}")
+    else:
+        ratio = None
+        ok = COORD_NN_MIN_UM <= median_nn <= COORD_NN_MAX_UM
+        test = 'nn_absolute_range'
+        detail = (f"median nearest-neighbour distance {median_nn:.2f} um is "
+                  f"outside [{COORD_NN_MIN_UM}, {COORD_NN_MAX_UM}] um")
+
+    result = {'median_nn_um': median_nn, 'median_area_um2': area,
+              'nn_area_ratio': (float(ratio) if ratio is not None else None),
+              'n_sampled': int(len(xy)), 'coord_columns': (xc, yc),
+              'test': test, 'ok': bool(ok)}
+
+    if not ok:
+        msg = (f"Coordinate scale check failed for {technology} on "
+               f"{xc}/{yc}: {detail}. Coordinates are probably not in "
+               f"micrometers.")
+        if raise_on_fail:
+            raise ValueError(msg)
+        print(f"  WARNING: {msg}")
+
+    return result
+
 
 def rasterize_fov_grid(meta, tile_size_um, min_cells_per_fov=0,
                        scan_axis='row', fov_col='fov'):

@@ -182,20 +182,21 @@ def check_batch_effect(out_dir, gt, rep):
     )
 
     # -- Bootstrap CI: reported, not failed on -------------------------------
-    # bootstrap_var_ci() resamples cells WITHIN each FOV, holding the FOV set
-    # fixed. It therefore estimates the uncertainty in tau^2 *conditional on
-    # these k FOVs* -- the right question for characterising one slide, which
-    # is what BISTRO is for. It is not a confidence interval for the population
-    # variance of the FOV offsets, and will not generally cover the injected
-    # value: it carries no uncertainty about which k offsets were drawn. With
-    # k=16 a population interval would span roughly +/-70%, while this one
-    # spans a few percent.
+    # bootstrap_var_ci() now defaults to scheme='cluster': FOVs are resampled
+    # with replacement, so the interval DOES carry the uncertainty about which
+    # k offsets were drawn and is the interval for tau^2 as a variance
+    # component. That is what a cross-slide comparison needs, and it is what
+    # the manuscript's claims are about. With k=16 it is wide, on the order of
+    # +/-70%, and it is expected to cover the injected value most of the time.
+    # scheme='within' (cells resampled inside a fixed FOV set) remains
+    # available and gives the much narrower CONDITIONAL interval.
     lo, hi = float(row["var_ci_lower"]), float(row["var_ci_upper"])
     if np.isfinite(lo) and np.isfinite(hi):
         rep.info(
             "Conditional bootstrap CI for tau^2",
-            f"[{lo:.5f}, {hi:.5f}] (within-FOV resampling, FOV set fixed); "
-            f"not expected to cover the injected {injected:.5f}",
+            f"[{lo:.5f}, {hi:.5f}] (FOV cluster resampling); "
+            f"injected {injected:.5f} "
+            f"{'inside' if lo <= injected <= hi else 'OUTSIDE'} the interval",
         )
 
     # -- Drift ---------------------------------------------------------------

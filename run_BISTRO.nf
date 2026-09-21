@@ -52,6 +52,8 @@ process assignFOV {
     publishDir "${params.output_folder_path}", mode: 'copy'
 
     script:
+    def fovMapArg  = params.fovMap    ? "--fov_map '${params.fovMap}'"        : ''
+    def fovTileArg = params.fovTileUm ? "--fov_tile_um '${params.fovTileUm}'" : ''
     """
     mkdir -p $outputDir
     PUB="${params.output_folder_path}/$outputDir"
@@ -66,7 +68,7 @@ process assignFOV {
         python ${projectDir}/bin/preprocessing/assign_fov.py \\
             --metadata $metadataCSV \\
             --technology $technology \\
-            --output_dir $outputDir
+            --output_dir $outputDir ${fovMapArg} ${fovTileArg}
     fi
     """
 }
@@ -607,6 +609,7 @@ process batch_effect_evaluation {
     script:
     def he_arg = heAlignmentPath ? "--he_alignment \"${heAlignmentPath}\"" : ""
     def vc_arg = params.vc_column ? "--vc_column ${params.vc_column}" : ""
+    def fe_arg = params.fixed_effect_column ? "--fixed_effect_column ${params.fixed_effect_column}" : ""
     """
     mkdir -p $outputDir
     PUB="${params.output_folder_path}/$outputDir"
@@ -633,6 +636,9 @@ process batch_effect_evaluation {
             --checkpoint_dir "${params.output_folder_path}/$outputDir/checkpoints" \\
             $he_arg \\
             $vc_arg \\
+            $fe_arg \\
+            --n_jobs ${task.cpus} \\
+            --ci_scheme cluster \\
             --use_log
     fi
     """
@@ -817,7 +823,11 @@ process generate_report {
 // ============================================================================
 // WORKFLOW
 // ============================================================================
-params.restore_published = params.restore_published ?: true
+params.restore_published = params.containsKey('restore_published') ? params.restore_published : true
+// Optional per-cell native FOV map; empty means rasterise.
+params.fovMap = params.containsKey('fovMap') ? params.fovMap : ''
+// Optional rasterisation pitch, 'width,height' in um.
+params.fovTileUm = params.containsKey('fovTileUm') ? params.fovTileUm : ''
 
 // Optional: an external reference annotation for the HVG benchmark. Declared
 // here so configs that omit it do not trigger Nextflow's "access to undefined

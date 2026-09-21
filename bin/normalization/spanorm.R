@@ -187,11 +187,22 @@ if (separate_fovs == "1") {
         ckpt_file <- file.path(ckpt_dir, paste0("fov_", fov, ".rds"))
 
         # Skip if checkpoint exists
+        # Validate the checkpoint by reading it; refit the FOV if it is unreadable.
+        ckpt_ok <- FALSE
         if (file.exists(ckpt_file)) {
-            cat(sprintf("[%d/%d] FOV %s: loading from checkpoint\n",
-                        i, length(fov_list), fov))
-            flush.console()
-            logcounts_list[[as.character(fov)]] <- readRDS(ckpt_file)
+            restored <- tryCatch(readRDS(ckpt_file), error = function(e) NULL)
+            if (is.null(restored)) {
+                cat(sprintf("  [%d/%d] FOV %s: checkpoint unreadable, refitting\n",
+                            i, length(fov_list), fov))
+                unlink(ckpt_file)
+            } else {
+                cat(sprintf("  [%d/%d] FOV %s: loading from checkpoint\n",
+                            i, length(fov_list), fov))
+                logcounts_list[[as.character(fov)]] <- restored
+                ckpt_ok <- TRUE
+            }
+        }
+        if (ckpt_ok) {
             next
         }
 
